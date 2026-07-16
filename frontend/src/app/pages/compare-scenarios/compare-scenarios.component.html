@@ -1,0 +1,173 @@
+<div class="compare-page">
+
+  <header class="app-header">
+    <div class="header-left">
+      <img
+        src="assets/planwise_logo.png"
+        alt="PlanWise Logo"
+        class="brand-logo"
+      />
+
+      <div class="header-text">
+        <h1>Scenario Comparison</h1>
+        <p>
+          Select completed scenario results and compare their KPIs side by side.
+        </p>
+      </div>
+    </div>
+
+    <nav class="page-nav">
+      <a routerLink="/data" routerLinkActive="active-link">Data</a>
+      <a routerLink="/solution" routerLinkActive="active-link">Scheduling</a>
+      <a routerLink="/compare-scenarios" routerLinkActive="active-link">
+        Compare Scenarios
+      </a>
+    </nav>
+  </header>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Select Scenarios</h2>
+        <p class="helper-text">
+          {{ getScenarioStatusText() }}
+        </p>
+      </div>
+    </div>
+
+    <div
+      class="scenario-selector-grid"
+      *ngIf="getScenarios().length; else noScenarioResults"
+    >
+      <label
+        class="scenario-checkbox"
+        *ngFor="let scenario of getScenarios()"
+      >
+        <input
+          type="checkbox"
+          [checked]="selectedScenarioIds.includes(scenario.ScenarioID)"
+          (change)="toggleScenario(
+            scenario.ScenarioID,
+            $any($event.target).checked
+          )"
+        />
+
+        <span>
+          {{ scenario.ScenarioName }}
+        </span>
+
+        <button
+          class="delete-scenario-btn"
+          type="button"
+          (click)="deleteScenario(scenario.ScenarioID); $event.stopPropagation()"
+        >
+          Delete
+        </button>
+      </label>
+    </div>
+
+    <ng-template #noScenarioResults>
+      <p class="empty-text">
+        No scenario results yet. Go to Scheduling, run the optimizer for at least one scenario, then return here.
+      </p>
+    </ng-template>
+  </section>
+
+  <section
+    class="panel"
+    *ngIf="getSelectedScenarios().length"
+  >
+    <div class="panel-header">
+      <h2>KPI Comparison</h2>
+    </div>
+
+    <div class="comparison-table-wrapper">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>KPI</th>
+
+            <th *ngFor="let scenario of getSelectedScenarios()">
+              {{ scenario.ScenarioName }}
+            </th>
+          </tr>
+        </thead>
+
+        <tbody>
+          <tr>
+            <td>Total Cost</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'TotalCost') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Delivery Performance %</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'DeliveryPerformancePercent') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Late Operations</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'LateOperations') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>OverSoak Violations</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'OverSoakViolations') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Oven Utilization %</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'OvenUtilizationPercent') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Machine Utilization %</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'MachineUtilizationPercent') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Total Setup Minutes</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'TotalSetupMinutes') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Production Hours</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'ProductionHours') }}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Total Schedule Hours</td>
+            <td *ngFor="let scenario of getSelectedScenarios()">
+              {{ getKpiValue(scenario, 'TotalScheduleHours') }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section
+    class="panel"
+    *ngIf="getScenarios().length && !getSelectedScenarios().length"
+  >
+    <p class="empty-text">
+      Select at least one scenario result to view comparison.
+    </p>
+  </section>
+
+</div>

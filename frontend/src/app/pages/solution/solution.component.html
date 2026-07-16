@@ -1,0 +1,673 @@
+<div class="solution-page">
+
+  <header class="app-header">
+    <div class="header-left">
+      <img
+        src="assets/planwise_logo.png"
+        alt="PlanWise Logo"
+        class="brand-logo"
+      />
+
+      <div class="header-text">
+        <h1>Scheduler</h1>
+        <p>
+          Select a scenario and run the scheduler. Parameters and downtime are edited on the Data page.
+        </p>
+      </div>
+    </div>
+
+    <nav class="page-nav">
+      <a routerLink="/data" routerLinkActive="active-link">Data</a>
+      <a routerLink="/solution" routerLinkActive="active-link">Scheduling</a>
+      <a routerLink="/compare-scenarios" routerLinkActive="active-link">
+        Compare Scenarios
+      </a>
+    </nav>
+  </header>
+
+  <section class="run-strip">
+    <div class="scenario-selector">
+      <label>Scenario to Run</label>
+
+      <select [(ngModel)]="selectedScenarioId">
+        <option
+          *ngFor="let scenario of getScenarioDefinitions()"
+          [value]="scenario.ScenarioID"
+        >
+          {{ scenario.ScenarioName }}
+        </option>
+      </select>
+    </div>
+
+    <button class="run-btn" (click)="runScheduler()" [disabled]="loading">
+      {{ loading ? 'Running...' : 'Run Optimizer' }}
+    </button>
+  </section>
+
+  <section class="scenario-strip">
+    <div class="scenario-left">
+      <label>Active Scenario Result</label>
+
+      <select
+        [value]="activeScenario?.ScenarioID || ''"
+        (change)="onScenarioChange($event)"
+      >
+        <option value="" disabled>No scenario result loaded</option>
+
+        <option
+          *ngFor="let scenario of getScenarios()"
+          [value]="scenario.ScenarioID"
+        >
+          {{ scenario.ScenarioName }}
+        </option>
+      </select>
+    </div>
+
+    <div class="scenario-meta" *ngIf="activeScenario">
+      <span>ID: {{ activeScenario.ScenarioID }}</span>
+      <span>Manual: {{ activeScenario.IsManualScenario ? 'Yes' : 'No' }}</span>
+      <span>Changes: {{ activeScenario.ManualChanges?.length || 0 }}</span>
+    </div>
+
+    <div class="scenario-actions">
+
+      <button
+        class="clone-btn"
+        (click)="cloneActiveScenario()"
+        [disabled]="!activeScenario"
+      >
+        Copy Schedule for Manual Editing
+      </button>
+    
+      <button
+        class="undo-btn"
+        (click)="undoLastChange()"
+        [disabled]="
+          !activeScenario ||
+          !(activeScenario.ManualChanges?.length)
+        "
+      >
+        Undo Last Change
+      </button>
+    
+    </div>
+  </section>
+
+  <div class="top-grid">
+    <section class="panel workorder-panel">
+      <div class="panel-header">
+        <h2>Imported Work Orders</h2>
+      </div>
+
+      <div class="workorder-list" *ngIf="getImportedWorkOrders().length; else noWorkOrders">
+        <div
+          class="workorder-card"
+          *ngFor="let wo of getImportedWorkOrders(); let i = index"
+        >
+          <div class="workorder-title">
+            {{ i + 1 }}. WO {{ wo.WorkOrderID }}
+          </div>
+
+          <div class="workorder-meta">
+            <span>Due: {{ wo.DueDate }}</span>
+            <span>Priority: {{ wo.Priority }}</span>
+            <span>Family: {{ wo.ProductFamily }}</span>
+            <span>Ops: {{ wo.OperationCount }}</span>
+            <span>Status: {{ wo.Status }}</span>
+          </div>
+        </div>
+      </div>
+
+      <ng-template #noWorkOrders>
+        <p class="empty-text">
+          Upload Excel on the Data page to view imported work orders.
+        </p>
+      </ng-template>
+    </section>
+
+    <section class="panel kpi-panel">
+      <div class="panel-header">
+        <h2>KPIs</h2>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <span>Feasible</span>
+          <strong>{{ kpis.feasible }}</strong>
+        </div>
+
+        <div class="kpi-card">
+          <span>Delivery %</span>
+          <strong>{{ kpis.deliveryPerformance }}</strong>
+        </div>
+
+        <div class="kpi-card">
+          <span>Late Ops</span>
+          <strong>{{ kpis.lateOrders }}</strong>
+        </div>
+
+        <div class="kpi-card">
+          <span>OverSoak</span>
+          <strong>{{ kpis.overSoak }}</strong>
+        </div>
+
+        <div class="kpi-card">
+          <span>Oven Util %</span>
+          <strong>{{ kpis.ovenUtilization }}</strong>
+        </div>
+
+        <div class="kpi-card">
+          <span>Total Cost</span>
+          <strong>{{ kpis.totalCost }}</strong>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel gantt-panel">
+    <div class="panel-header">
+      <h2>Interactive Gantt</h2>
+
+      <div class="gantt-actions">
+        <a
+          class="download-link"
+          href="http://127.0.0.1:8000/download-excel"
+          target="_blank"
+        >
+          Download Excel
+        </a>
+
+        <button class="zoom-btn" (click)="zoomOut()" title="Zoom out">−</button>
+        <button class="zoom-btn" (click)="zoomIn()" title="Zoom in">+</button>
+      </div>
+    </div>
+
+  
+    <div
+      class="gantt-board"
+      *ngIf="gantt.length; else noGantt"
+    >
+      <button
+        class="zoom-btn"
+        type="button"
+        (click)="clearSelection()"
+        title="Clear work-order highlight"
+      >
+        ×
+      </button>
+      <div
+        class="gantt-content"
+        [style.width.px]="110 + getTimelineWidth()"
+      >
+        <div class="timeline-corner">
+          Machine
+        </div>
+        <div
+          class="timeline-header"
+          [style.width.px]="getTimelineWidth()"
+        >
+        
+          <div class="day-row">
+        
+
+            <div
+              class="day-cell"
+              *ngFor="let tick of getDayTicks()"
+              [style.left.px]="tick.left"
+              [style.width.px]="tick.width"
+            >
+
+                {{ tick.label }}
+
+            </div>
+        
+          </div>
+        
+          <div class="hour-row">
+        
+            <div
+              class="hour-cell"
+              *ngFor="let tick of getHourTicks()"
+              [style.left.px]="tick.left"
+              [style.width.px]="pixelsPerHour"
+            >
+              <span class="hour-label">
+               {{ tick.label }}
+              </span>
+            </div>
+        
+          </div>
+        
+        </div>
+    
+        <svg
+          class="precedence-layer"
+          [attr.width]="getTimelineWidth()"
+          [attr.height]="getGanttHeight()"
+        >
+          <defs>
+            <marker
+              id="arrowhead"
+              markerWidth="8"
+              markerHeight="8"
+              refX="7"
+              refY="3"
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path d="M 0 0 L 7 3 L 0 6 z"></path>
+            </marker>
+          </defs>
+
+          <path
+            *ngFor="let link of getVisiblePrecedenceLinks()"
+            class="precedence-link"
+            [attr.d]="getArrowPath(link)"
+            marker-end="url(#arrowhead)"
+          ></path>
+        </svg>
+
+        <div
+          class="gantt-machine-row"
+          *ngFor="let machine of getMachines()"
+          [style.minHeight.px]="getMachineHeight(machine)"
+        >
+          <div class="machine-label">
+            {{ machine }}
+          </div>
+
+          <div
+            class="gantt-timeline"
+            [style.height.px]="getMachineHeight(machine)"
+            [style.width.px]="getTimelineWidth()"
+          >
+            <div
+              class="timeline-grid-line"
+              *ngFor="let tick of getHourTicks()"
+              [style.left.px]="tick.left"
+            >
+            </div>
+            <div
+              class="downtime-block"
+              *ngFor="let downtime of getDowntimesForMachine(machine)"
+              [style.left.px]="getDowntimeLeft(downtime)"
+              [style.width.px]="getDowntimeWidth(downtime)"
+              [title]="
+                'Downtime'
+                + '\nMachine: ' + downtime.MachineID
+                + '\nReason: ' + downtime.Reason
+                + '\nStart: ' + downtime.StartTime
+                + '\nEnd: ' + downtime.EndTime
+              "
+            >
+              <span>{{ downtime.Reason }}</span>
+            </div>
+
+            <ng-container *ngIf="isOven(machine)">
+
+
+              <div
+                class="batch-container"
+                *ngFor="let batch of getBatchGroupsForMachine(machine)"
+
+                [style.left.px]="getBatchLeft(batch)"
+                [style.width.px]="getBatchWidth(batch)"
+                [style.height.px]="getBatchHeight(batch)"
+                (mouseenter)="showBatchTooltip($event,batch)"
+                (mousemove)="moveBatchTooltip($event)"
+                (mouseleave)="scheduleHideBatchTooltip()"
+              >
+
+                <div
+                  class="oversoak-layer"
+                  *ngIf="getOverSoakWidth(batch) > 0"
+                  [style.left.px]="getHeatingWidth(batch)"
+                  [style.width.px]="getOverSoakWidth(batch)"
+                  [style.height.px]="getBatchHeight(batch)"
+                >
+                  <span
+                    class="oversoak-label"
+                    *ngIf="getOverSoakWidth(batch) >= 90"
+                  >
+                    Waiting in oven
+                  </span>
+                </div>
+
+                <div
+                  class="heating-card"
+                  [style.width.px]="getHeatingWidth(batch)"
+                  [style.height.px]="getBatchHeight(batch)"
+                >
+                  <div class="batch-header">
+                    {{ getOperationShortName(batch) }}
+                    · {{ getBatchWoCount(batch) }} WO
+                  </div>
+
+                  <button
+                    type="button"
+                    class="batch-operation batch-operation-button"
+                    *ngFor="let op of getUniqueBatchOperations(batch)"
+
+                    [class.selected-workorder]="
+                      isWorkOrderSelected(op.WorkOrderID)
+                    "
+
+                    [class.dimmed-workorder]="
+                      isWorkOrderDimmed(op.WorkOrderID)
+                    "
+
+                    (pointerdown)="$event.stopPropagation()"
+                    (click)="selectWorkOrderById($event, op.WorkOrderID)"
+                  >
+                    WO {{ op.WorkOrderID }}
+                  </button>
+                </div>
+              </div>
+            
+            
+            </ng-container>
+
+            <ng-container
+              *ngFor="let row of getRowsForMachine(machine)"
+            >
+
+              <div
+              *ngIf="!row.BatchID"
+              class="gantt-bar"
+
+              [class.oven-bar]="isOven(row)"
+              [class.press-bar]="isPress(row)"
+              [class.selected-bar]="selectedRow?.OperationID === row.OperationID"
+
+
+              [class.selected-workorder]="
+                isWorkOrderSelected(row.WorkOrderID)
+              "
+
+              [class.dimmed-workorder]="
+                isWorkOrderDimmed(row.WorkOrderID)
+              "
+
+              [style.left.px]="getLeft(row)"
+              [style.width.px]="getWidth(row)"
+              [style.top.px]="getTop(row)"
+              [style.height.px]="getBarHeight(row)"
+              
+              (pointerdown)="$event.stopPropagation()"
+              (click)="selectWorkOrderById($event, row.WorkOrderID)"
+              (contextmenu)="openContextMenu($event, row)"
+              >
+
+                <div class="bar-title">
+                  WO {{ row.WorkOrderID }}
+                </div>
+
+                <div class="bar-subtitle">
+                  Seq {{ row.SequenceNumber }}
+                </div>
+              </div>
+
+            </ng-container>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <ng-template #noGantt>
+      <p class="empty-text">Run scheduler to generate Gantt chart.</p>
+    </ng-template>
+  </section>
+
+  <section class="panel planned-task-panel">
+    <div class="panel-header">
+      <h2>Planned Tasks</h2>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Planned Task</th>
+            <th>Scenario</th>
+            <th>Work Order</th>
+            <th>Operation</th>
+            <th>Machine</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Batch End</th>
+            <th>Manual</th>
+            <th>Violation</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          <tr *ngFor="let row of plannedTasks">
+            <td>{{ row.PlannedTaskID }}</td>
+            <td>{{ row.ScenarioID }}</td>
+            <td>{{ row.WorkOrderID }}</td>
+            <td>{{ row.OperationID }}</td>
+            <td>{{ row.PlannedMachine || row.AssignedMachine }}</td>
+            <td>{{ row.StartTime }}</td>
+            <td>{{ row.EndTime }}</td>
+            <td>{{ row.BatchEndTime || '-' }}</td>
+            <td>{{ row.IsManual }}</td>
+            <td>{{ row.ViolationStatus }}</td>
+          </tr>
+
+          <tr *ngIf="!plannedTasks.length">
+            <td colspan="9" class="empty-text">
+              No planned tasks yet.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel schedule-panel">
+    <div class="panel-header">
+      <h2>Optimized Schedule</h2>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Work Order</th>
+            <th>Operation</th>
+            <th>Machine</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Batch End</th>
+            <th>Late</th>
+            <th>OverSoak</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          <tr *ngFor="let row of schedule">
+            <td>{{ row.WorkOrderID }}</td>
+            <td>{{ row.OperationID }}</td>
+            <td>{{ row.AssignedMachine }}</td>
+            <td>{{ row.StartTime }}</td>
+            <td>{{ row.EndTime }}</td>
+            <td>{{ row.BatchEndTime || '-' }}</td>
+            <td>{{ row.Late }}</td>
+            <td>{{ row.OverSoakViolation }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div
+    class="context-menu"
+    *ngIf="contextMenu.visible"
+    [style.left.px]="contextMenu.x"
+    [style.top.px]="contextMenu.y"
+    (click)="$event.stopPropagation()"
+  >
+    <div class="context-title">
+      WO {{ contextMenu.row.WorkOrderID }}
+    </div>
+
+    <button (click)="unplanWorkOrder()">
+      Unplan Work Order
+    </button>
+
+    <div class="context-divider"></div>
+
+    <div class="context-label">
+      Move to Machine
+    </div>
+
+    <button
+      *ngFor="let machine of getAvailableMachinesForRow(contextMenu.row)"
+      (click)="changeMachine(contextMenu.row, machine)"
+    >
+      {{ machine }}
+    </button>
+  </div>
+
+  <div
+      class="batch-tooltip"
+      *ngIf="batchTooltip.visible && batchTooltip.batch"
+      [style.left.px]="batchTooltip.x"
+      [style.top.px]="batchTooltip.y"
+      (mouseenter)="onTooltipMouseEnter()"
+      (mouseleave)="onTooltipMouseLeave()"
+  >
+
+      <div class="tooltip-title">
+          {{ batchTooltip.batch.BatchID }}
+      </div>
+
+      <div class="tooltip-subtitle">
+          {{ batchTooltip.batch.AssignedMachine }}
+          ·
+          {{ getOperationShortName(batchTooltip.batch) }}
+      </div>
+
+      <hr>
+
+      <table>
+
+        <tr>
+          <td>Start</td>
+          <td>
+            {{ formatTooltipDate(batchTooltip.batch.StartTime) }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Heating end</td>
+          <td>
+            {{ formatTooltipDate(batchTooltip.batch.HeatingEndTime) }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Batch end</td>
+          <td>
+            {{ formatTooltipDate(batchTooltip.batch.BatchEndTime) }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Waiting in oven</td>
+          <td>
+            {{ formatMinutes(getBatchWaitingMinutes(batchTooltip.batch)) }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Family</td>
+          <td>
+            {{ batchTooltip.batch.Operations?.[0]?.ProductFamily || '-' }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Temperature</td>
+          <td>
+            {{
+              batchTooltip.batch.Operations?.[0]?.Temperature
+              ?? batchTooltip.batch.Operations?.[0]?.NominalTemperature
+              ?? '-'
+            }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Total weight</td>
+          <td>
+            {{ getBatchTotalWeight(batchTooltip.batch) || '-' }}
+          </td>
+        </tr>
+        
+        <tr>
+          <td>Total length</td>
+          <td>
+            {{ getBatchTotalLength(batchTooltip.batch) || '-' }}
+          </td>
+        </tr>
+
+      </table>
+
+      <hr>
+
+      <table>
+
+          <tr>
+              <td>Family</td>
+              <td>{{ batchTooltip.batch.Operations[0]?.ProductFamily }}</td>
+          </tr>
+
+          <tr>
+              
+              <td>Temperature</td>
+              <td>
+              {{ batchTooltip.batch.Operations[0]?.Temperature ??
+                 batchTooltip.batch.Operations[0]?.NominalTemperature }}
+              </td>
+
+          </tr>
+
+          <tr>
+              <td>Total weight</td>
+              <td>{{ getBatchTotalWeight(batchTooltip.batch) }}</td>
+          </tr>
+
+          <tr>
+              <td>Total length</td>
+              <td>{{ getBatchTotalLength(batchTooltip.batch) }}</td>
+          </tr>
+
+      </table>
+
+      <hr>
+
+      <div class="tooltip-section">
+
+          WORK ORDERS
+
+      </div>
+
+      <div class="tooltip-workorders">
+
+          <button
+              *ngFor="let op of getUniqueBatchOperations(batchTooltip.batch)"
+              class="tooltip-chip"
+              (pointerdown)="$event.stopPropagation()"
+              (click)="selectWorkOrderById($event,op.WorkOrderID)"
+          >
+
+              {{ op.WorkOrderID }}
+
+          </button>
+
+      </div>
+
+  </div>
+
+</div>

@@ -1,0 +1,27 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f5f7fb;
+  }
+  
+  .top-nav {
+    display: flex;
+    gap: 20px;
+    padding: 14px 24px;
+    background: #1f2937;
+  }
+  
+  .top-nav a {
+    color: #d1d5db;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  
+  .top-nav a.active {
+    color: white;
+    border-bottom: 2px solid white;
+  }
+  
+  .page {
+    padding: 24px;
+  }

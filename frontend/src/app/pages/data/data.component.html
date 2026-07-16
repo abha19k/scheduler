@@ -1,0 +1,358 @@
+<div class="data-page">
+
+  <header class="app-header">
+
+    <div class="header-left">
+      <img
+        src="assets/planwise_logo.png"
+        alt="PlanWise Logo"
+        class="brand-logo"
+      />
+
+      <div class="header-text">
+        <h1>Data</h1>
+        <p>
+          Upload Excel data, configure scenarios,
+          edit parameters, and define machine downtime.
+        </p>
+      </div>
+    </div>
+
+    <nav class="page-nav">
+      <a routerLink="/data" routerLinkActive="active-link">Data</a>
+      <a routerLink="/solution" routerLinkActive="active-link">Scheduling</a>
+      <a routerLink="/compare-scenarios" routerLinkActive="active-link">
+        Compare Scenarios
+      </a>
+    </nav>
+
+  </header>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Upload Excel</h2>
+    </div>
+
+    <div class="upload-row">
+      <input
+        type="file"
+        accept=".xlsx,.xls"
+        (change)="onFileSelected($event)"
+      />
+
+      <button
+        class="primary-btn"
+        (click)="uploadExcel()"
+        [disabled]="uploading"
+      >
+        {{
+          uploading
+            ? ('Uploading ' + uploadProgress + '%')
+            : 'Upload Excel'
+        }}
+      </button>
+    </div>
+  </section>
+
+  <section class="panel" *ngIf="importedData">
+    <div class="panel-header">
+      <div>
+        <h2>Imported Excel Data</h2>
+        <p class="helper-text">
+          Search, review, and paginate through imported Excel sheets.
+        </p>
+      </div>
+    </div>
+  
+    <div
+      class="data-card"
+      *ngFor="let sheetName of getImportedSheetNames()"
+    >
+      <div class="sheet-header">
+        <div>
+          <span>{{ sheetName }}</span>
+          <strong>
+            {{ getFilteredRows(sheetName).length }}
+            / {{ getImportedSheet(sheetName).totalRows }} rows
+          </strong>
+        </div>
+  
+        <input
+          class="sheet-search"
+          type="text"
+          placeholder="Search this sheet..."
+          [ngModel]="getSearchText(sheetName)"
+          (ngModelChange)="updateSearchText(sheetName, $event)"
+        />
+      </div>
+  
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th *ngFor="let col of getImportedSheet(sheetName).columns">
+                {{ col }}
+              </th>
+            </tr>
+          </thead>
+  
+          <tbody>
+            <tr *ngFor="let row of getPaginatedRows(sheetName)">
+              <td *ngFor="let col of getImportedSheet(sheetName).columns">
+                {{ row[col] }}
+              </td>
+            </tr>
+  
+            <tr *ngIf="!getPaginatedRows(sheetName).length">
+              <td
+                class="empty-text"
+                [attr.colspan]="getImportedSheet(sheetName).columns.length"
+              >
+                No matching rows found.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+  
+      <div class="pagination-row">
+        <button
+          class="secondary-btn"
+          type="button"
+          (click)="goToPreviousPage(sheetName)"
+          [disabled]="getPageIndex(sheetName) === 0"
+        >
+          Previous
+        </button>
+  
+        <span>
+          Page {{ getPageIndex(sheetName) + 1 }}
+          of {{ getTotalPages(sheetName) }}
+        </span>
+  
+        <button
+          class="secondary-btn"
+          type="button"
+          (click)="goToNextPage(sheetName)"
+          [disabled]="getPageIndex(sheetName) + 1 >= getTotalPages(sheetName)"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  </section>
+  
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Create Scenario</h2>
+    </div>
+
+    <div class="form-grid">
+      <label>
+        Scenario Name
+
+        <input
+          type="text"
+          [(ngModel)]="newScenarioName"
+          placeholder="Example: Maintenance Week"
+        />
+      </label>
+
+      <label>
+        Base Scenario
+
+        <select [(ngModel)]="newScenarioBaseId">
+          <option
+            *ngFor="let scenario of getScenarioDefinitions()"
+            [value]="scenario.ScenarioID"
+          >
+            {{ scenario.ScenarioName }}
+          </option>
+        </select>
+      </label>
+
+      <button
+        class="primary-btn"
+        type="button"
+        (click)="createScenario()"
+      >
+        Create Scenario
+      </button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Scenario Parameters</h2>
+    </div>
+
+    <div class="scenario-picker">
+      <label>
+        Scenario
+
+        <select [(ngModel)]="selectedScenarioId">
+          <option
+            *ngFor="let scenario of getScenarioDefinitions()"
+            [value]="scenario.ScenarioID"
+          >
+            {{ scenario.ScenarioName }}
+          </option>
+        </select>
+      </label>
+
+      <p *ngIf="getSelectedScenario()">
+        {{ getSelectedScenario()?.Description }}
+      </p>
+    </div>
+
+    <div class="parameter-grid">
+      <label>
+        Population Size
+
+        <input
+          type="number"
+          [ngModel]="getSelectedParameters().PopulationSize"
+          (ngModelChange)="updateParameter('PopulationSize', $event)"
+        />
+      </label>
+
+      <label>
+        Generations
+
+        <input
+          type="number"
+          [ngModel]="getSelectedParameters().Generations"
+          (ngModelChange)="updateParameter('Generations', $event)"
+        />
+      </label>
+
+      <label>
+        Mutation Rate
+
+        <input
+          type="number"
+          step="0.01"
+          [ngModel]="getSelectedParameters().MutationRate"
+          (ngModelChange)="updateParameter('MutationRate', $event)"
+        />
+      </label>
+
+      <label>
+        Late Order Penalty
+
+        <input
+          type="number"
+          [ngModel]="getSelectedParameters().LateOrderPenalty"
+          (ngModelChange)="updateParameter('LateOrderPenalty', $event)"
+        />
+      </label>
+
+      <label>
+        Max OverSoak Minutes
+
+        <input
+          type="number"
+          [ngModel]="getSelectedParameters().MaxOverSoakMinutes"
+          (ngModelChange)="updateParameter('MaxOverSoakMinutes', $event)"
+        />
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Machine Downtime</h2>
+    </div>
+
+    <div class="form-grid">
+      <label>
+        Machine
+
+        <select [(ngModel)]="newDowntime.MachineID">
+          <option
+            *ngFor="let machine of machineOptions"
+            [value]="machine"
+          >
+            {{ machine }}
+          </option>
+        </select>
+      </label>
+
+      <label>
+        Start
+
+        <input
+          type="datetime-local"
+          [(ngModel)]="newDowntime.StartTime"
+        />
+      </label>
+
+      <label>
+        End
+
+        <input
+          type="datetime-local"
+          [(ngModel)]="newDowntime.EndTime"
+        />
+      </label>
+
+      <label>
+        Reason
+
+        <input
+          type="text"
+          [(ngModel)]="newDowntime.Reason"
+        />
+      </label>
+
+      <button
+        class="primary-btn"
+        type="button"
+        (click)="addDowntime()"
+      >
+        Add Downtime
+      </button>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Scenario</th>
+            <th>Machine</th>
+            <th>Start</th>
+            <th>End</th>
+            <th>Reason</th>
+            <th></th>
+          </tr>
+        </thead>
+
+        <tbody>
+          <tr *ngFor="let downtime of getSelectedScenario()?.Downtimes || []">
+            <td>{{ downtime.ScenarioID }}</td>
+            <td>{{ downtime.MachineID }}</td>
+            <td>{{ downtime.StartTime }}</td>
+            <td>{{ downtime.EndTime }}</td>
+            <td>{{ downtime.Reason }}</td>
+
+            <td>
+              <button
+                class="danger-btn"
+                (click)="removeDowntime(downtime)"
+              >
+                Remove
+              </button>
+            </td>
+          </tr>
+
+          <tr *ngIf="!(getSelectedScenario()?.Downtimes || []).length">
+            <td colspan="6" class="empty-text">
+              No downtime configured.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
