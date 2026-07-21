@@ -632,6 +632,11 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
     machines = deepcopy(scheduling_input.machines)
 
     params = scheduling_input.parameters
+
+    print(
+        "ACTIVE HEAT STRATEGY:",
+        repr(params.HeatStrategy)
+    )
     planning_start = params.PlanningStart
     setup_matrix = scheduling_input.family_setup_matrix
     calendar_details = scheduling_input.calendar_details
@@ -826,8 +831,13 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
             )
 
         return best_choice[1], best_choice[2]
+    
 
-    def choose_best_press(op, ready_time):
+    def choose_best_press(
+        op,
+        material_ready_time,
+        allow_setup_before_material=True,
+    ):
         candidates = get_candidate_presses(op)
 
         if not candidates:
@@ -835,14 +845,15 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                 f"No feasible press for {op.OperationID}"
             )
 
-        best = None
+        best_decision = None
+        best_score = None
 
         for machine_id in candidates:
             machine = machines[machine_id]
 
             machine_available = get_machine_available_time(
                 machine,
-                planning_start
+                planning_start,
             )
 
             previous_op = get_previous_operation(machine)
@@ -856,68 +867,213 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                 previous_op,
                 op,
                 setup_matrix,
-                params
+                params,
             )
 
-            earliest_setup_start = max(
-                machine_available,
-                ready_time
-            )
+            # Setup can begin as soon as the press is available.
+            if allow_setup_before_material:
+                earliest_setup_start = machine_available
+            else:
+                earliest_setup_start = max(
+                    machine_available,
+                    material_ready_time,
+                )
 
             total_block_hours = (
-                total_setup / 60
+                total_setup / 60.0
             ) + op.DurationHours
 
             setup_start = adjust_to_calendar_and_downtime(
                 machine,
                 calendar_details,
                 earliest_setup_start,
-                total_block_hours
+                total_block_hours,
             )
 
-            production_start = setup_start + timedelta(
+            setup_complete = setup_start + timedelta(
                 minutes=total_setup
+            )
+
+            # Pressing cannot start until both conditions are satisfied:
+            # 1. setup is complete
+            # 2. material has completed heating
+            production_start = max(
+                setup_complete,
+                material_ready_time,
             )
 
             production_end = production_start + timedelta(
                 hours=op.DurationHours
             )
 
+            waiting_minutes = max(
+                0.0,
+                (
+                    production_start - material_ready_time
+                ).total_seconds() / 60.0,
+            )
+
+
+
             score = (
+                waiting_minutes,
                 production_end,
                 total_setup,
                 machine_id,
             )
 
-            if best is None or score < best[0]:
-                best = (
-                    score,
-                    machine_id,
-                    setup_start,
-                    production_start,
-                    production_end,
-                    total_setup,
-                    family_setup,
-                    width_setup,
-                    temp_setup,
-                )
+            if best_score is None or score < best_score:
+                best_score = score
 
-        return best
+                best_decision = {
+                    "MachineID": machine_id,
+                    "SetupStart": setup_start,
+                    "SetupComplete": setup_complete,
+                    "ProductionStart": production_start,
+                    "ProductionEnd": production_end,
+                    "SetupMinutes": total_setup,
+                    "FamilySetupMinutes": family_setup,
+                    "WidthSetupMinutes": width_setup,
+                    "TemperatureSetupMinutes": temp_setup,
+                    "WaitingMinutes": waiting_minutes,
+                }
+
+        return best_decision
+    
+    def predict_press_decision(
+        next_operation,
+        material_ready_time,
+    ):
+        if next_operation is None:
+            return None
+
+        decision = choose_best_press(
+            next_operation,
+            material_ready_time,
+            allow_setup_before_material=True,
+        )
+
+        print(
+            f"[PREDICT] "
+            f"WO={next_operation.WorkOrderID} "
+            f"SEQ={next_operation.SequenceNumber} "
+            f"MACHINE={decision['MachineID']} "
+            f"MATERIAL_READY={material_ready_time} "
+            f"SETUP_START={decision['SetupStart']} "
+            f"SETUP_COMPLETE={decision['SetupComplete']} "
+            f"PRESS={decision['ProductionStart']} "
+            f"WAIT={decision['WaitingMinutes']:.1f}"
+        )
+
+        return decision
+
+        
+
+    
+    # def predict_press_start(
+    #     next_operation,
+    #     ready_time,
+    # ):
+    #     """
+    #     Predict when the next press operation would actually start.
+
+    #     This does NOT reserve the machine or update any timelines.
+    #     """
+
+    #     if next_operation is None:
+    #         return None
+
+    #     decision = choose_best_press(
+    #         next_operation,
+    #         ready_time,
+    #     )
+
+
+    #     if decision is None:
+    #         return None
+        
+
+    #     print(
+    #         f"[PREDICT] "
+    #         f"WO={next_operation.WorkOrderID} "
+    #         f"SEQ={next_operation.SequenceNumber} "
+    #         f"MACHINE={decision['MachineID']} "
+    #         f"READY={ready_time} "
+    #         f"SETUP_START={decision['SetupStart']} "
+    #         f"SETUP_MIN={decision['SetupMinutes']} "
+    #         f"FAMILY_SETUP={decision['FamilySetupMinutes']} "
+    #         f"WIDTH_SETUP={decision['WidthSetupMinutes']} "
+    #         f"TEMP_SETUP={decision['TemperatureSetupMinutes']} "
+    #         f"PRESS={decision['ProductionStart']}"
+    #     )
+
+    #     return decision["ProductionStart"]
+
+
 
     def schedule_press_operation(op, ready_time, persistent_batch_id):
-        (
-            _,
-            machine_id,
-            setup_start,
-            production_start,
-            production_end,
-            total_setup,
-            family_setup,
-            width_setup,
-            temp_setup,
-        ) = choose_best_press(op, ready_time)
+        decision = choose_best_press(
+            op,
+            ready_time,
+            allow_setup_before_material=True,
+        )
+
+
+        if decision is None:
+            raise RuntimeError(
+                f"No feasible press found for operation {op.OperationID}"
+            )
+
+        machine_id = decision["MachineID"]
+        setup_start = decision["SetupStart"]
+        production_start = decision["ProductionStart"]
+        production_end = decision["ProductionEnd"]
+
+        total_setup = decision["SetupMinutes"]
+        family_setup = decision["FamilySetupMinutes"]
+        width_setup = decision["WidthSetupMinutes"]
+        temp_setup = decision["TemperatureSetupMinutes"]
+        waiting_minutes = decision["WaitingMinutes"]
 
         machine = machines[machine_id]
+
+
+
+        print(
+            f"[WAIT ] "
+            f"WO={op.WorkOrderID} "
+            f"READY={ready_time} "
+            f"PRESS={production_start} "
+            f"WAIT={waiting_minutes:.1f} min"
+        )
+
+        print(
+            "\nACTUAL PRESS",
+            {
+                "WO": op.WorkOrderID,
+                "OP": op.OperationID,
+                "Machine": machine_id,
+                "ReadyTime": ready_time,
+                "SetupStart": setup_start,
+                "ProductionStart": production_start,
+                "ProductionEnd": production_end,
+                "SetupMinutes": total_setup,
+                "TimelineLengthBefore": len(machine.Timeline),
+            },
+        )
+
+
+        print(
+            f"[ACTUAL ] "
+            f"WO={op.WorkOrderID} "
+            f"SEQ={op.SequenceNumber} "
+            f"MACHINE={machine_id} "
+            f"READY={ready_time} "
+            f"SETUP_START={setup_start} "
+            f"SETUP_MIN={total_setup} "
+            f"PRESS={production_start} "
+            f"WAIT={waiting_minutes:.1f}"
+        )
 
         op.AssignedMachine = machine_id
         op.PersistentBatchID = persistent_batch_id
@@ -933,6 +1089,8 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
 
         op.OverSoakMinutes = 0
         op.OverSoakViolation = False
+
+        op.WaitingMinutes = waiting_minutes
 
         due_end = op.DueDate + timedelta(days=1)
         op.Late = production_end > due_end
@@ -952,13 +1110,153 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
         completed[
             (
                 op.WorkOrderID,
-                op.SequenceNumber
+                op.SequenceNumber,
             )
         ] = production_end
 
         scheduled_rows.append(op)
 
-        return production_end
+        return {
+            "StartTime": production_start,
+            "EndTime": production_end,
+            "MachineID": machine_id,
+        }
+
+    
+    def calculate_heating_start(
+        strategy,
+        oven,
+        next_operation,
+        batch_ready_time,
+        machine_available,
+        setup_minutes,
+        heating_duration_hours,
+        calendar_details,
+        planning_start,
+    ):
+        """
+        Returns the setup start time for a heating batch.
+        """
+
+        print(
+            "\nHEAT STRATEGY DEBUG",
+            {
+                "strategy": strategy,
+                "oven": getattr(oven, "MachineID", None),
+                "next_operation": (
+                    getattr(next_operation, "OperationID", None)
+                    if next_operation is not None
+                    else None
+                ),
+                "batch_ready_time": batch_ready_time,
+                "machine_available": machine_available,
+                "heating_duration_hours": heating_duration_hours,
+                "setup_minutes": setup_minutes,
+            }
+        )
+
+        total_block_hours = (
+            setup_minutes / 60
+        ) + heating_duration_hours
+
+        if strategy == "EarliestStart":
+
+            earliest_setup_start = max(
+                machine_available,
+                batch_ready_time,
+            )
+
+            return adjust_to_calendar_and_downtime(
+                oven,
+                calendar_details,
+                earliest_setup_start,
+                total_block_hours,
+            )
+        
+        if strategy == "JustInTime":
+            earliest_heating_start = max(
+                machine_available,
+                batch_ready_time,
+                planning_start,
+            )
+
+            earliest_heating_start = adjust_to_calendar_and_downtime(
+                oven,
+                calendar_details,
+                earliest_heating_start,
+                total_block_hours,
+            )
+
+            earliest_heating_end = (
+                earliest_heating_start
+                + timedelta(minutes=setup_minutes)
+                + timedelta(hours=heating_duration_hours)
+            )
+
+            press_decision = predict_press_decision(
+                next_operation,
+                earliest_heating_end,
+            )
+
+            if press_decision is None:
+                return earliest_heating_start
+
+            # Heating should finish close to actual pressing,
+            # not at the beginning of press setup.
+            target_press_start = press_decision["ProductionStart"]
+
+            candidate_setup_start = (
+                target_press_start
+                - timedelta(minutes=setup_minutes)
+                - timedelta(hours=heating_duration_hours)
+            )
+
+            candidate_setup_start = max(
+                candidate_setup_start,
+                machine_available,
+                batch_ready_time,
+                planning_start,
+            )
+
+            final_candidate = adjust_to_calendar_and_downtime(
+                oven,
+                calendar_details,
+                candidate_setup_start,
+                total_block_hours,
+            )
+
+            print(
+                "JIT CALCULATION",
+                {
+                    "operation": (
+                        next_operation.OperationID
+                        if next_operation is not None
+                        else None
+                    ),
+                    "earliest_heating_start": earliest_heating_start,
+                    "earliest_heating_end": earliest_heating_end,
+                    "press_machine": press_decision["MachineID"],
+                    "predicted_press_setup_start":
+                        press_decision["SetupStart"],
+                    "predicted_press_setup_complete":
+                        press_decision["SetupComplete"],
+                    "predicted_press_production_start":
+                        press_decision["ProductionStart"],
+                    "candidate_setup_start": candidate_setup_start,
+                    "final_candidate": final_candidate,
+                },
+            )
+
+            return final_candidate
+
+
+        raise ValueError(
+            f"Unknown HeatStrategy: {strategy}"
+        )
+    
+
+
+    
 
     def schedule_heating_batch(
         batch_wos,
@@ -1021,26 +1319,36 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
             planning_start
         )
 
-        earliest_setup_start = max(
-            machine_available,
-            batch_ready_time
-        )
-
         max_duration = max(
             op.DurationHours
             for op in batch_ops
         )
 
-        total_block_hours = (
-            total_setup / 60
-        ) + max_duration
+        next_operation = None
 
-        setup_start = adjust_to_calendar_and_downtime(
-            oven,
-            calendar_details,
-            earliest_setup_start,
-            total_block_hours
+        next_sequence = sequence_number + 1
+
+        if batch_wos:
+            representative_wo = batch_wos[0]
+
+            next_operation = (
+                operations_by_wo
+                .get(representative_wo, {})
+                .get(next_sequence)
+            )
+
+        setup_start = calculate_heating_start(
+            strategy=params.HeatStrategy,
+            oven=oven,
+            next_operation=next_operation,
+            batch_ready_time=batch_ready_time,
+            machine_available=machine_available,
+            setup_minutes=total_setup,
+            heating_duration_hours=max_duration,
+            calendar_details=calendar_details,
+            planning_start=planning_start,
         )
+
 
         production_start = setup_start + timedelta(
             minutes=total_setup
@@ -1112,6 +1420,7 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
 
     campaign_counter = 1
 
+
     while remaining_work_orders:
         seed_wo = remaining_work_orders[0]
 
@@ -1173,7 +1482,8 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                         for wo in batch_wos
                     )
                 ):
-                    press_end_times = []
+
+                    press_results = []
 
                     for wo in batch_wos:
                         press_op = operations_by_wo[wo].get(
@@ -1190,17 +1500,36 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                             )
                         ]
 
-                        press_end = schedule_press_operation(
+                        print(
+                            "PRESS READY",
+                            press_op.OperationID,
+                            press_ready,
+                        )
+
+                        press_result = schedule_press_operation(
                             press_op,
                             press_ready,
                             persistent_batch_id,
                         )
 
-                        press_end_times.append(press_end)
+                        press_results.append(press_result)
 
-                    batch_release_time = max(
-                        press_end_times
-                    )
+                    if press_results:
+                        batch_release_time = max(
+                            result["StartTime"]
+                            for result in press_results
+                        )
+                    else:
+                        batch_release_time = heating_result["heating_end"]
+
+                    for wo in batch_wos:
+                        press_op = operations_by_wo[wo].get(
+                            next_sequence
+                        )
+
+                        if press_op is None:
+                            continue
+
 
                     for op in heating_result["batch_ops"]:
                         op.BatchEndTime = batch_release_time
@@ -1288,12 +1617,7 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
             if wo in remaining_work_orders:
                 remaining_work_orders.remove(wo)
 
-        print(
-            "FINISHED BATCH",
-            batch_id,
-            "WOs",
-            batch_wos,
-        )
+
 
     # -----------------------------------------------------
     # POST CHECKS
@@ -1306,7 +1630,6 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
         )
     )
 
-    print("\n========== BATCH SUMMARY ==========\n")
 
     batches = {}
 
@@ -1317,35 +1640,6 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                 []
             ).append(row)
 
-    for batch_id, rows in batches.items():
-        print(
-            batch_id,
-            "WO count:",
-            len(
-                set(
-                    str(r.WorkOrderID)
-                    for r in rows
-                )
-            ),
-            "WOs:",
-            sorted(
-                set(
-                    str(r.WorkOrderID)
-                    for r in rows
-                )
-            ),
-            "Start:",
-            min(r.StartTime for r in rows),
-            "BatchEnd:",
-            max(
-                getattr(
-                    r,
-                    "BatchEndTime",
-                    r.EndTime
-                )
-                for r in rows
-            )
-        )
 
     batch_sizes = {}
 
@@ -1356,24 +1650,12 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                 set()
             ).add(op.WorkOrderID)
 
-    print("\n===== BATCH KPI =====")
 
     sizes = [
         len(v)
         for v in batch_sizes.values()
     ]
 
-    if sizes:
-        print("Batches:", len(sizes))
-        print(
-            "Average Size:",
-            sum(sizes) / len(sizes)
-        )
-        print("Largest Batch:", max(sizes))
-    else:
-        print("Batches:", 0)
-        print("Average Size:", 0)
-        print("Largest Batch:", 0)
 
     return (
         scheduled_rows,

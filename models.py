@@ -254,9 +254,13 @@ class Parameters:
     MaximumAllowedGapBetweenHeatingAndPressHours: float = 4
     MaxOverSoakMinutes: int = 240
 
+    HeatStrategy: str = "JustInTime"
+
     Objectives: List[str] = field(default_factory=list)
 
     PlanningStart: Optional[datetime] = None
+
+
 
 
 @dataclass

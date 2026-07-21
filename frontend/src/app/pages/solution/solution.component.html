@@ -437,6 +437,9 @@
             <th>Batch End</th>
             <th>Manual</th>
             <th>Violation</th>
+            <th>Heating End</th>
+            <th>Batch End</th>
+            <th>Waiting (min)</th>
           </tr>
         </thead>
 
@@ -452,6 +455,17 @@
             <td>{{ row.BatchEndTime || '-' }}</td>
             <td>{{ row.IsManual }}</td>
             <td>{{ row.ViolationStatus }}</td>
+            <td>{{ row.EndTime }}</td>
+
+            <td>{{ row.BatchEndTime }}</td>
+            <td>
+              {{
+                getBatchWaitingMinutes({
+                  HeatingEndTime: row.EndTime,
+                  BatchEndTime: row.BatchEndTime
+                })
+              }}
+            </td>
           </tr>
 
           <tr *ngIf="!plannedTasks.length">
