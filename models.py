@@ -37,6 +37,14 @@ class Operation:
     StartTime: Optional[datetime] = None
     EndTime: Optional[datetime] = None
 
+    SetupStart: Optional[datetime] = None
+    StartTime: Optional[datetime] = None
+    EndTime: Optional[datetime] = None
+
+    HeatingEndTime: Optional[datetime] = None
+    ReleaseTime: Optional[datetime] = None
+    WaitingMinutes: float = 0
+
     SetupMinutes: float = 0
     FamilySetupMinutes: float = 0
     WidthSetupMinutes: float = 0
@@ -142,6 +150,10 @@ class PlannedTask:
     StartTime: datetime
     EndTime: datetime
     DurationHours: float
+
+    HeatingEndTime: Optional[datetime] = None
+    ReleaseTime: Optional[datetime] = None
+    WaitingMinutes: float = 0
     BatchEndTime: Optional[datetime] = None
 
     ProductFamily: Optional[str] = None

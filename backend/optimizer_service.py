@@ -54,6 +54,8 @@ def serialize_planned_task(task: PlannedTask) -> dict:
     data["EndTime"] = serialize_datetime(task.EndTime)
     data["CreatedDate"] = serialize_datetime(task.CreatedDate)
     data["UpdatedDate"] = serialize_datetime(task.UpdatedDate)
+    data["HeatingEndTime"] = serialize_datetime(task.HeatingEndTime)
+    data["ReleaseTime"] = serialize_datetime(task.ReleaseTime)
     data["BatchEndTime"] = serialize_datetime(task.BatchEndTime)
 
     return data
@@ -197,6 +199,11 @@ def build_planned_tasks_from_schedule(
             SetupStart=op.SetupStart,
             StartTime=op.StartTime,
             EndTime=op.EndTime,
+
+            HeatingEndTime=getattr(op, "HeatingEndTime", None),
+            ReleaseTime=getattr(op, "ReleaseTime", None),
+            WaitingMinutes=getattr(op, "WaitingMinutes", 0),
+
             DurationHours=op.DurationHours,
             BatchEndTime=getattr(op, "BatchEndTime", None),
 

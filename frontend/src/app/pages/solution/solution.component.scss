@@ -851,36 +851,52 @@ td {
   top: 0;
 
   background: #2563eb;
-  border-radius: 8px;
+  border-radius: 8px 0 0 8px;
   color: white;
 
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 
   overflow: hidden;
-  z-index: 3;
+  z-index: 2;
 
   padding: 6px;
   box-sizing: border-box;
+
 }
+
+
 
 .oversoak-layer {
   position: absolute;
   top: 0;
 
-  background:
-    repeating-linear-gradient(
-      45deg,
-      #d6dbe2,
-      #d6dbe2 6px,
-      #eef2f7 6px,
-      #eef2f7 12px
-    );
+  background: repeating-linear-gradient(
+    45deg,
+    #f59e0b,
+    #f59e0b 6px,
+    #fbbf24 6px,
+    #fbbf24 12px
+  );
 
+  border-left: none;
   border-radius: 0 8px 8px 0;
+
   overflow: hidden;
-  z-index: 1;
+  z-index: 4;
 }
 
+
+.oversoak-layer.violation {
+  background: repeating-linear-gradient(
+      45deg,
+      #dc2626,
+      #dc2626 6px,
+      #ef4444 6px,
+      #ef4444 12px
+  );
+
+  border-left: 2px solid #991b1b;
+}
 
 .oversoak-label {
   position: absolute;
@@ -893,6 +909,20 @@ td {
 
   white-space: nowrap;
   pointer-events: none;
+}
+
+
+.heating-end-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+
+  width: 2px;
+  background: rgba(255, 255, 255, 0.9);
+
+  z-index: 25;
+  pointer-events: none;
+  height:100%;
 }
 
 .batch-header {

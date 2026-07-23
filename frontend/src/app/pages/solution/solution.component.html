@@ -334,6 +334,11 @@
                 </div>
 
                 <div
+                  class="heating-end-marker"
+                  [style.left.px]="getHeatingWidth(batch)"
+              ></div>
+
+                <div
                   class="heating-card"
                   [style.width.px]="getHeatingWidth(batch)"
                   [style.height.px]="getBatchHeight(batch)"
@@ -455,14 +460,15 @@
             <td>{{ row.BatchEndTime || '-' }}</td>
             <td>{{ row.IsManual }}</td>
             <td>{{ row.ViolationStatus }}</td>
-            <td>{{ row.EndTime }}</td>
+            <td>{{ row.HeatingEndTime }}</td>
 
             <td>{{ row.BatchEndTime }}</td>
             <td>
               {{
                 getBatchWaitingMinutes({
-                  HeatingEndTime: row.EndTime,
+                  HeatingEndTime: row.HeatingEndTime,
                   BatchEndTime: row.BatchEndTime
+
                 })
               }}
             </td>

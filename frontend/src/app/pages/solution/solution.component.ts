@@ -555,51 +555,56 @@ export class SolutionComponent {
   
     return hours * this.pixelsPerHour;
   }
-
-  getBatchWidth(batch:any){
-
-    const start =
-        new Date(batch.StartTime).getTime();
-
-    const end =
-        new Date(batch.BatchEndTime).getTime();
-
+  
+  getBatchWidth(batch: any): number {
+    if (!batch?.StartTime || !batch?.BatchEndTime) {
+      return 0;
+    }
+  
+    const start = new Date(batch.StartTime).getTime();
+    const batchEnd = new Date(batch.BatchEndTime).getTime();
+  
     return Math.max(
-        ((end-start)/(1000*60*60))
-        * this.pixelsPerHour,
-        60
+      1,
+      ((batchEnd - start) / (1000 * 60 * 60)) *
+        this.pixelsPerHour
     );
+  }
+
   
-  }
-
-  getHeatingWidth(batch:any){
-
-    return (
-        (
-            new Date(batch.HeatingEndTime).getTime()
-            -
-            new Date(batch.StartTime).getTime()
-        )
-        /
-        (1000*60*60)
-    ) * this.pixelsPerHour;
-
-  }
-
-  getOverSoakWidth(batch:any){
-
-    return (
-        (
-            new Date(batch.BatchEndTime).getTime()
-            -
-            new Date(batch.HeatingEndTime).getTime()
-        )
-        /
-        (1000*60*60)
-    ) * this.pixelsPerHour;
-
-  }
+  getHeatingWidth(batch: any): number {
+    if (!batch?.StartTime || !batch?.HeatingEndTime) {
+      return 0;
+    }
   
+    const start = new Date(batch.StartTime).getTime();
+    const heatingEnd = new Date(batch.HeatingEndTime).getTime();
+  
+    return Math.max(
+      0,
+      ((heatingEnd - start) / (1000 * 60 * 60)) *
+        this.pixelsPerHour
+    );
+  }
+
+  getOverSoakWidth(batch: any): number {
+    if (!batch?.HeatingEndTime || !batch?.BatchEndTime) {
+      return 0;
+    }
+  
+    const heatingEnd =
+      new Date(batch.HeatingEndTime).getTime();
+  
+    const batchEnd =
+      new Date(batch.BatchEndTime).getTime();
+  
+    return Math.max(
+      0,
+      ((batchEnd - heatingEnd) / (1000 * 60 * 60)) *
+        this.pixelsPerHour
+    );
+  }
+
 
   getOperationShortName(batch: any): string {
     const op = batch?.Operations?.[0];

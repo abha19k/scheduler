@@ -431,15 +431,23 @@ def check_oversoak_after_scheduling(scheduled_rows, params):
             op.OverSoakViolation = False
             continue
 
-        release_time = getattr(
-            op,
-            "BatchEndTime",
-            op.EndTime
+        heating_end = (
+            getattr(op, "HeatingEndTime", None)
+            or op.EndTime
         )
 
-        gap_minutes = (
-            next_op.StartTime - release_time
-        ).total_seconds() / 60
+        if heating_end is None or next_op.StartTime is None:
+            op.OverSoakMinutes = 0
+            op.OverSoakViolation = False
+            continue
+
+        gap_minutes = max(
+            0.0,
+            (
+                next_op.StartTime - heating_end
+            ).total_seconds() / 60.0
+        )
+
 
         if gap_minutes < 0:
             gap_minutes = 0
@@ -536,17 +544,29 @@ def repair_oversoak_by_delaying_work_orders(
                 member.StartTime += shift
                 member.EndTime += shift
 
-                if hasattr(member, "BatchEndTime"):
+                if getattr(member, "HeatingEndTime", None) is not None:
+                    member.HeatingEndTime += shift
+
+                if getattr(member, "ReleaseTime", None) is not None:
+                    member.ReleaseTime += shift
+
+                if getattr(member, "BatchEndTime", None) is not None:
                     member.BatchEndTime += shift
 
         else:
-
             op.SetupStart += shift
             op.StartTime += shift
             op.EndTime += shift
 
-            if hasattr(op, "BatchEndTime"):
+            if getattr(op, "HeatingEndTime", None) is not None:
+                op.HeatingEndTime += shift
+
+            if getattr(op, "ReleaseTime", None) is not None:
+                op.ReleaseTime += shift
+
+            if getattr(op, "BatchEndTime", None) is not None:
                 op.BatchEndTime += shift
+
 
 
         repaired = True
@@ -605,17 +625,29 @@ def repair_oversoak_by_delaying_work_orders(
                         member.StartTime += shift
                         member.EndTime += shift
 
-                        if hasattr(member, "BatchEndTime"):
+                        if getattr(member, "HeatingEndTime", None) is not None:
+                            member.HeatingEndTime += shift
+
+                        if getattr(member, "ReleaseTime", None) is not None:
+                            member.ReleaseTime += shift
+
+                        if getattr(member, "BatchEndTime", None) is not None:
                             member.BatchEndTime += shift
 
                 else:
-
                     curr_op.SetupStart += shift
                     curr_op.StartTime += shift
                     curr_op.EndTime += shift
 
-                    if hasattr(curr_op, "BatchEndTime"):
+                    if getattr(curr_op, "HeatingEndTime", None) is not None:
+                        curr_op.HeatingEndTime += shift
+
+                    if getattr(curr_op, "ReleaseTime", None) is not None:
+                        curr_op.ReleaseTime += shift
+
+                    if getattr(curr_op, "BatchEndTime", None) is not None:
                         curr_op.BatchEndTime += shift
+
 
 
                 repaired = True
@@ -1082,6 +1114,9 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
         op.StartTime = production_start
         op.EndTime = production_end
 
+        op.HeatingEndTime = ready_time
+        op.ReleaseTime = production_start
+
         op.SetupMinutes = total_setup
         op.FamilySetupMinutes = family_setup
         op.WidthSetupMinutes = width_setup
@@ -1090,7 +1125,13 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
         op.OverSoakMinutes = 0
         op.OverSoakViolation = False
 
-        op.WaitingMinutes = waiting_minutes
+        op.WaitingMinutes = max(
+            0,
+            (
+                op.ReleaseTime
+                - op.HeatingEndTime
+            ).total_seconds() / 60
+        )
 
         due_end = op.DueDate + timedelta(days=1)
         op.Late = production_end > due_end
@@ -1120,6 +1161,7 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
             "StartTime": production_start,
             "EndTime": production_end,
             "MachineID": machine_id,
+            "ReleaseTime": production_start,
         }
 
     
@@ -1365,9 +1407,8 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
 
             op.SetupStart = setup_start
             op.StartTime = production_start
-            op.EndTime = production_start + timedelta(
-                hours=op.DurationHours
-            )
+            op.EndTime = heating_end
+            op.HeatingEndTime = heating_end
 
             op.SetupMinutes = (
                 total_setup
@@ -1395,15 +1436,17 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
 
             op.OverSoakMinutes = 0
             op.OverSoakViolation = False
+            op.WaitingMinutes = 0
 
             completed[
                 (
                     op.WorkOrderID,
                     op.SequenceNumber
                 )
-            ] = op.EndTime
+            ] = heating_end
 
             scheduled_rows.append(op)
+
 
         return {
             "oven": oven,
@@ -1532,6 +1575,7 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
 
 
                     for op in heating_result["batch_ops"]:
+                        op.HeatingEndTime = heating_result["heating_end"]
                         op.BatchEndTime = batch_release_time
 
                     heating_result["oven"].Timeline.append({
@@ -1561,6 +1605,7 @@ def schedule_operations(operation_order, machine_assignment, scheduling_input):
                     ]
 
                     for op in heating_result["batch_ops"]:
+                        op.HeatingEndTime = heating_result["heating_end"]
                         op.BatchEndTime = batch_release_time
 
                     heating_result["oven"].Timeline.append({

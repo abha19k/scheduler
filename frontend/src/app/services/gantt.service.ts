@@ -37,7 +37,7 @@ export class GanttService {
           BatchID: row.BatchID,
           AssignedMachine: machine,
           StartTime: row.StartTime,
-          HeatingEndTime: row.EndTime,      
+          HeatingEndTime: row.HeatingEndTime || row.EndTime,      
           BatchEndTime: row.BatchEndTime || row.EndTime,
           Operations:[]
         });
@@ -60,13 +60,18 @@ export class GanttService {
       ) {
         batch.StartTime = row.StartTime;
       }
-  
-      if(
-        new Date(row.EndTime) >
-        new Date(batch.HeatingEndTime)
-      ){
-        batch.HeatingEndTime = row.EndTime;
+
+      const heatingEnd =
+          row.HeatingEndTime || row.EndTime;
+
+      if (
+          new Date(heatingEnd).getTime() >
+          new Date(batch.HeatingEndTime).getTime()
+      ) {
+          batch.HeatingEndTime = heatingEnd;
       }
+        
+
     
       const visualEnd =
         row.BatchEndTime || row.EndTime;
@@ -92,6 +97,7 @@ export class GanttService {
           new Date(a.StartTime).getTime() -
           new Date(b.StartTime).getTime()
       );
+
 
     return result;
   
