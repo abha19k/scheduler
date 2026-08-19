@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+
 
 
 @dataclass
@@ -290,3 +291,25 @@ class SchedulingInput:
     active_scenario_id: Optional[str] = None
 
     objective_overrides: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Campaign:
+    campaign_id: str
+    persistent_batch_id: str
+    work_order_ids: Tuple[str, ...]
+    preferred_oven_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ScheduleDecision:
+    machine_id: str
+    setup_start: datetime
+    production_start: datetime
+    production_end: datetime
+    setup_minutes: float = 0.0
+    family_setup_minutes: float = 0.0
+    width_setup_minutes: float = 0.0
+    temperature_setup_minutes: float = 0.0
+    score: Any = None
+    explanation: Dict[str, Any] = field(default_factory=dict)

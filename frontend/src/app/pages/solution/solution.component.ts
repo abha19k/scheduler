@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { Component, HostListener } from '@angular/core';
+import { Component, HostListener, ElementRef, ViewChild } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { HttpClient } from '@angular/common/http';
 import { RouterLink, RouterLinkActive } from '@angular/router';
@@ -10,6 +10,17 @@ import {
 } from '../../services/scenario.service';
 import { TimelineService } from '../../services/timeline.service';
 import { GanttService } from '../../services/gantt.service';
+import { DragService } from '../../services/drag.service';
+
+import {
+  SchedulingEngineService,
+  PushRowSnapshot,
+  BatchPushResult
+} from '../../services/scheduling-engine.service';
+
+import {
+  ManualChangeService
+} from '../../services/manual-change.service';
 
 @Component({
   selector: 'app-solution',
@@ -23,14 +34,25 @@ import { GanttService } from '../../services/gantt.service';
   templateUrl: './solution.component.html',
   styleUrls: ['./solution.component.scss']
 })
+
+
 export class SolutionComponent {
+
+  @ViewChild('ganttBoard')
+  ganttBoard!: ElementRef<HTMLDivElement>;
+
   constructor(
     private http: HttpClient,
     public scenarioService: ScenarioService,
     private timelineService: TimelineService,
-    private ganttService: GanttService
+    private ganttService: GanttService,
+    public dragService: DragService,
+    private schedulingEngine:
+      SchedulingEngineService,
+    private manualChangeService:
+      ManualChangeService
   ) {}
-
+  
   loading = false;
   pixelsPerHour = 22;
 
@@ -53,6 +75,7 @@ export class SolutionComponent {
   gantt: any[] = [];
 
   selectedRow: any = null;
+  selectedBatch: any = null;
 
   contextMenu = {
     visible: false,
@@ -68,11 +91,29 @@ export class SolutionComponent {
     batch: null as any
   };
 
-  dragState: any = null;
+  dragValidation = {
+    valid: true,
+    message: ''
+  };
 
+  dragTarget = {
+    machine: null as string | null,
+    valid: true,
+    message: ''
+  };
+
+  batchContextMenu = {
+    visible: false,
+    x: 0,
+    y: 0,
+    batch: null as any
+  };
 
   selectedWorkOrderId: string | null = null;
   mouseInsideTooltip = false;
+
+  timelineMinTime = 0;
+  timelineMaxTime = 0;
 
 
   ngOnInit(): void {
@@ -215,18 +256,84 @@ export class SolutionComponent {
     return Object.values(grouped);
   }
 
-  showBatchTooltip(event: MouseEvent, batch: any): void {
+
+  showBatchTooltip(
+    event: MouseEvent,
+    batch: any
+  ): void {
+    if (
+      this.dragService.isBatchDragging() ||
+      this.batchContextMenu.visible ||
+      this.contextMenu.visible
+    ) {
+      return;
+    }
+  
     this.batchTooltip.visible = true;
     this.batchTooltip.batch = batch;
     this.batchTooltip.x = event.clientX + 14;
     this.batchTooltip.y = event.clientY + 14;
   }
+
+  onGanttWheel(event: WheelEvent): void {
+
+    if (!(event.ctrlKey || event.metaKey)) {
+      return;
+    }
+  
+    event.preventDefault();
+  
+    const board = this.ganttBoard.nativeElement;
+  
+    const rect = board.getBoundingClientRect();
+  
+    const mouseX =
+        event.clientX - rect.left;
+  
+    const scrollLeft =
+        board.scrollLeft;
+  
+    const worldX =
+        scrollLeft + mouseX;
+  
+    const oldPixels =
+        this.pixelsPerHour;
+  
+    if (event.deltaY < 0) {
+  
+        this.pixelsPerHour =
+            Math.min(
+                this.pixelsPerHour + 2,
+                80
+            );
+  
+    } else {
+  
+        this.pixelsPerHour =
+            Math.max(
+                this.pixelsPerHour - 2,
+                6
+            );
+    }
+  
+    const scale =
+        this.pixelsPerHour / oldPixels;
+  
+    board.scrollLeft =
+        worldX * scale - mouseX;
+  }
   
 
-  moveBatchTooltip(event: MouseEvent): void {
-
-    if (!this.batchTooltip.visible) return;
-
+  moveBatchTooltip(event: MouseEvent): void {  
+    if (
+      !this.batchTooltip.visible ||
+      this.dragService.isBatchDragging() ||
+      this.batchContextMenu.visible ||
+      this.contextMenu.visible
+    ) {
+      return;
+    }
+  
     this.batchTooltip.x = event.clientX + 18;
     this.batchTooltip.y = event.clientY + 18;
   }
@@ -306,6 +413,8 @@ export class SolutionComponent {
 
     this.plannedTasks = scenario.PlannedTasks || [];
 
+    this.ganttService.clearBatchCache();
+
     this.gantt = this.plannedTasks.map((row: any) => ({
       ...row,
       AssignedMachine: row.PlannedMachine || row.AssignedMachine,
@@ -314,17 +423,14 @@ export class SolutionComponent {
       lane: row.lane || 0
     }));
 
-    this.workOrderSequence = [
-      ...new Set(
-        this.gantt
-          .sort(
-            (a, b) =>
-              new Date(a.StartTime).getTime() -
-              new Date(b.StartTime).getTime()
-          )
-          .map(row => row.WorkOrderID)
-      )
-    ];
+    this.captureTimelineRange();
+
+    this.workOrderSequence =
+      this.manualChangeService
+        .buildWorkOrderSequence(
+          this.gantt
+        );
+
 
     this.schedule = this.gantt.map(row => ({
       WorkOrderID: row.WorkOrderID,
@@ -341,6 +447,30 @@ export class SolutionComponent {
     this.contextMenu.visible = false;
 
     this.recalculateLanes();
+  }
+
+  captureTimelineRange(): void {
+    if (!this.gantt.length) {
+      this.timelineMinTime = Date.now();
+      this.timelineMaxTime =
+        this.timelineMinTime + 24 * 60 * 60 * 1000;
+      return;
+    }
+  
+    const actualMin =
+      this.timelineService.getMinTime(this.gantt);
+  
+    const actualMax =
+      this.timelineService.getMaxTime(this.gantt);
+  
+    const padding =
+      4 * 60 * 60 * 1000;
+  
+    this.timelineMinTime =
+      actualMin - padding;
+  
+    this.timelineMaxTime =
+      actualMax + padding;
   }
 
   
@@ -364,16 +494,6 @@ export class SolutionComponent {
 
         console.log('FULL RESPONSE:', response);
 
-        console.table(
-          this.plannedTasks.map(x => ({
-            WO: x.WorkOrderID,
-            Op: x.OperationID,
-            Batch: x.BatchID,
-            Machine: x.PlannedMachine || x.AssignedMachine,
-            Start: x.StartTime,
-            End: x.EndTime
-          }))
-        );
 
         this.loading = false;
 
@@ -394,45 +514,15 @@ export class SolutionComponent {
         };
 
         this.scenarioService.createScenario(scenario);
-        this.activeScenario = scenario;
+
+        this.activeScenario =
+            this.scenarioService.activeScenario();
 
         this.workOrderSequence = response.workOrderSequence || [];
         this.schedule = response.schedule || [];
         this.plannedTasks = response.plannedTasks || [];
 
-        console.table(
-          this.plannedTasks
-            .filter((r: any) => r.BatchID)
-            .map((r: any) => ({
-              WO: r.WorkOrderID,
-              Op: r.OperationID,
-              Batch: r.BatchID,
-              Machine: r.PlannedMachine || r.AssignedMachine,
-              Start: r.StartTime,
-              End: r.EndTime,
-              BatchEnd: r.BatchEndTime
-            }))
-        );
-        
-        const batches = new Map();
-        
-        this.plannedTasks
-          .filter((r: any) => r.BatchID)
-          .forEach((r: any) => {
-            if (!batches.has(r.BatchID)) {
-              batches.set(r.BatchID, new Set());
-            }
-        
-            batches.get(r.BatchID).add(r.WorkOrderID);
-          });
-        
-        console.log(
-          [...batches.entries()].map(([batch, wos]) => ({
-            Batch: batch,
-            WOCount: (wos as Set<any>).size,
-            WOs: [...(wos as Set<any>)].join(',')
-          }))
-        );
+        this.ganttService.clearBatchCache();
 
         this.gantt = this.plannedTasks.map((row: any) => ({
           ...row,
@@ -441,6 +531,8 @@ export class SolutionComponent {
           EndTime: row.EndTime,
           lane: 0
         }));
+
+        this.captureTimelineRange();
 
         this.kpis = {
           feasible: response.kpis.FeasibleSchedule,
@@ -555,6 +647,90 @@ export class SolutionComponent {
   
     return hours * this.pixelsPerHour;
   }
+
+  getBatchSetupStart(batch: any): string | null {
+    const op = batch?.Operations?.[0];
+  
+    return (
+      batch?.SetupStartTime ||
+      batch?.SetupStart ||
+      op?.SetupStartTime ||
+      op?.SetupStart ||
+      null
+    );
+  }
+  
+  getBatchSetupLeft(batch: any): number {
+    const setupStartValue =
+      this.getBatchSetupStart(batch);
+  
+    if (!setupStartValue) {
+      return this.getBatchLeft(batch);
+    }
+  
+    const setupStart =
+      new Date(setupStartValue).getTime();
+  
+    const min =
+      this.getMinTime();
+  
+    return (
+      ((setupStart - min) /
+        (1000 * 60 * 60)) *
+      this.pixelsPerHour
+    );
+  }
+  
+  getBatchSetupWidth(batch: any): number {
+    const setupStartValue =
+      this.getBatchSetupStart(batch);
+  
+    if (
+      !setupStartValue ||
+      !batch?.StartTime
+    ) {
+      return 0;
+    }
+  
+    const setupStart =
+      new Date(setupStartValue).getTime();
+  
+    const batchStart =
+      new Date(batch.StartTime).getTime();
+  
+    return Math.max(
+      0,
+      ((batchStart - setupStart) /
+        (1000 * 60 * 60)) *
+        this.pixelsPerHour
+    );
+  }
+  
+  getBatchSetupMinutes(batch: any): number {
+    const setupStartValue =
+      this.getBatchSetupStart(batch);
+  
+    if (
+      !setupStartValue ||
+      !batch?.StartTime
+    ) {
+      return 0;
+    }
+  
+    const setupStart =
+      new Date(setupStartValue).getTime();
+  
+    const batchStart =
+      new Date(batch.StartTime).getTime();
+  
+    return Math.max(
+      0,
+      Math.round(
+        (batchStart - setupStart) /
+        (1000 * 60)
+      )
+    );
+  }
   
   getBatchWidth(batch: any): number {
     if (!batch?.StartTime || !batch?.BatchEndTime) {
@@ -568,6 +744,14 @@ export class SolutionComponent {
       1,
       ((batchEnd - start) / (1000 * 60 * 60)) *
         this.pixelsPerHour
+    );
+  }
+
+  isManualBatch(batch: any): boolean {
+    return (batch?.Operations || []).some(
+      (op: any) =>
+        op.IsManual === true ||
+        String(op.Source || '').toUpperCase() === 'MANUAL'
     );
   }
 
@@ -790,9 +974,7 @@ export class SolutionComponent {
           ...row,
           DisplayLabel: `WO ${row.WorkOrderID}`,
           StartTime: row.StartTime,
-          EndTime: isBatchedOvenRow
-            ? row.BatchEndTime || row.EndTime
-            : row.EndTime,
+          EndTime: row.EndTime,
           lane: isBatchedOvenRow
             ? this.getBatchMemberLane(row)
             : row.lane || 0
@@ -854,34 +1036,197 @@ export class SolutionComponent {
     );
   }
 
+  getCurrentTimeLeft(): number | null {
+
+    if (!this.gantt.length) {
+      return null;
+    }
+  
+    const now = Date.now();
+  
+    const min = this.getMinTime();
+    const max = this.getMaxTime();
+  
+    if (now < min || now > max) {
+      return null;
+    }
+  
+    const hoursFromStart =
+      (now - min) / (1000 * 60 * 60);
+  
+    return hoursFromStart * this.pixelsPerHour;
+  }
+
+  getMilestones(): any[] {
+
+    if (!this.plannedTasks.length) {
+      return [];
+    }
+  
+    const grouped = new Map<string, any>();
+  
+    for (const row of this.plannedTasks) {
+  
+      if (!row.DueDate) {
+        continue;
+      }
+  
+      const due = new Date(row.DueDate);
+  
+      const key = due.toISOString();
+  
+      if (!grouped.has(key)) {
+  
+        grouped.set(key, {
+          type: 'due',
+          dueDate: due,
+          workOrders: []
+        });
+  
+      }
+  
+      grouped.get(key).workOrders.push(row.WorkOrderID);
+    }
+  
+    return [...grouped.values()].map(m => ({
+  
+      ...m,
+  
+      left:
+        ((m.dueDate.getTime() - this.getMinTime()) /
+          (1000 * 60 * 60))
+        * this.pixelsPerHour
+  
+    }));
+  }
+
+
 
   getMinTime(): number {
-    return this.timelineService.getMinTime(this.gantt);
+    if (!this.timelineMinTime) {
+      this.captureTimelineRange();
+    }
+  
+    return this.timelineMinTime;
   }
   
+
   getMaxTime(): number {
-    return this.timelineService.getMaxTime(this.gantt);
+    if (!this.timelineMaxTime) {
+      this.captureTimelineRange();
+    }
+  
+    return this.timelineMaxTime;
   }
   
+
   getTimelineWidth(): number {
-    return this.timelineService.getTimelineWidth(
-      this.gantt,
-      this.pixelsPerHour
+    const totalHours =
+      (this.getMaxTime() - this.getMinTime()) /
+      (1000 * 60 * 60);
+  
+    return Math.max(
+      totalHours * this.pixelsPerHour,
+      2800
     );
   }
 
-  getHourTicks() {
-    return this.timelineService.generateHourTicks(
-      this.gantt,
-      this.pixelsPerHour
-    );
+  // getHourTicks() {
+  //   return this.timelineService.generateHourTicks(
+  //     this.gantt,
+  //     this.pixelsPerHour
+  //   );
+  // }
+
+  getHourTicks(): any[] {
+    const ticks: any[] = [];
+  
+    let current =
+      new Date(this.getMinTime());
+  
+    current.setMinutes(0, 0, 0);
+  
+    while (
+      current.getTime() <= this.getMaxTime()
+    ) {
+      ticks.push({
+        label: current.toLocaleTimeString(
+          'en-GB',
+          {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          }
+        ),
+  
+        left:
+          (
+            (
+              current.getTime() -
+              this.getMinTime()
+            ) /
+            (1000 * 60 * 60)
+          ) *
+          this.pixelsPerHour
+      });
+  
+      current = new Date(
+        current.getTime() +
+        60 * 60 * 1000
+      );
+    }
+  
+    return ticks;
   }
   
-  getDayTicks() {
-    return this.timelineService.generateDayTicks(
-      this.gantt,
-      this.pixelsPerHour
-    );
+  // getDayTicks() {
+  //   return this.timelineService.generateDayTicks(
+  //     this.gantt,
+  //     this.pixelsPerHour
+  //   );
+  // }
+
+  getDayTicks(): any[] {
+    const ticks: any[] = [];
+  
+    let current =
+      new Date(this.getMinTime());
+  
+    current.setHours(0, 0, 0, 0);
+  
+    while (
+      current.getTime() <= this.getMaxTime()
+    ) {
+      ticks.push({
+        label: current.toLocaleDateString(
+          'en-GB',
+          {
+            day: '2-digit',
+            month: 'short'
+          }
+        ),
+  
+        left:
+          (
+            (
+              current.getTime() -
+              this.getMinTime()
+            ) /
+            (1000 * 60 * 60)
+          ) *
+          this.pixelsPerHour,
+  
+        width:
+          this.pixelsPerHour * 24
+      });
+  
+      current = new Date(
+        current.getTime() +
+        24 * 60 * 60 * 1000
+      );
+    }
+  
+    return ticks;
   }
 
 
@@ -903,7 +1248,6 @@ export class SolutionComponent {
   
     const end =
       new Date(
-        row.BatchEndTime ||
         row.EndTime
       ).getTime();
   
@@ -1056,7 +1400,10 @@ export class SolutionComponent {
 
       for (const row of rows) {
         const start = new Date(row.StartTime).getTime();
-        const end = new Date(row.BatchEndTime || row.EndTime).getTime();
+        const end =
+          new Date(
+              row.EndTime
+          ).getTime();
 
         let assignedLane = 0;
 
@@ -1095,76 +1442,558 @@ export class SolutionComponent {
     return top;
   }
 
-  getRowCenterX(row: any, side: 'start' | 'end'): number {
-    const left = this.getLeft(row);
-    const width = this.getWidth(row);
-
-    return side === 'start' ? left : left + width;
+  private getBatchForRow(
+    row: any
+  ): any | null {
+    if (!row?.BatchID) {
+      return null;
+    }
+  
+    const machine =
+      row.AssignedMachine ||
+      row.PlannedMachine;
+  
+    return (
+      this
+        .getBatchGroupsForMachine(
+          machine
+        )
+        .find(
+          (batch: any) =>
+            String(batch.BatchID) ===
+            String(row.BatchID)
+        ) || null
+    );
   }
 
-  getRowCenterY(row: any): number {
-    const machineTop = this.getMachineTopOffset(row.AssignedMachine);
-    const rowTop = this.getTop(row);
-    const height = this.getBarHeight(row);
+  getRowCenterX(
+    row: any,
+    side: 'start' | 'end'
+  ): number {
+  
+    /*
+     * Use the timing of the ACTUAL operation row.
+     *
+     * Do not use the outer batch-card width for
+     * precedence arrows.
+     */
+    const startValue =
+      row.StartTime;
+  
+    const endValue =
+      this.isOven(row)
+        ? (
+            row.ReleaseTime ||
+            row.BatchEndTime ||
+            row.HeatingEndTime ||
+            row.EndTime
+          )
+        : row.EndTime;
+  
+    const value =
+      side === 'start'
+        ? startValue
+        : endValue;
+  
+    if (!value) {
+      return 0;
+    }
+  
+    const time =
+      new Date(value).getTime();
+  
+    const min =
+      this.getMinTime();
+  
+    return (
+      (
+        time - min
+      ) /
+      (1000 * 60 * 60)
+    ) * this.pixelsPerHour;
+  }
 
-    return machineTop + rowTop + height / 2;
+
+  getRowCenterY(
+    row: any
+  ): number {
+    const machine =
+      row.AssignedMachine ||
+      row.PlannedMachine;
+  
+    const machineTop =
+      this.getMachineTopOffset(
+        machine
+      );
+  
+    /*
+     * OVEN BATCH
+     *
+     * Anchor the arrow to the actual WO line
+     * displayed inside the batch card.
+     */
+    if (
+      this.isOven(row) &&
+      row.BatchID
+    ) {
+      const batch =
+        this.getBatchForRow(row);
+  
+      if (batch) {
+        const operations =
+          this.getUniqueBatchOperations(
+            batch
+          );
+  
+        const woIndex =
+          operations.findIndex(
+            (op: any) =>
+              String(op.WorkOrderID) ===
+              String(row.WorkOrderID)
+          );
+  
+        const safeIndex =
+          Math.max(
+            0,
+            woIndex
+          );
+  
+        /*
+         * Current batch structure:
+         *
+         * batch starts ~12px from row top
+         * header occupies roughly 38px
+         * each WO button occupies ~26px
+         */
+        const batchTop =
+          this.getBatchTop(batch);
+  
+        const headerHeight =
+          38;
+  
+        const workOrderHeight =
+          26;
+  
+        return (
+          machineTop +
+          batchTop +
+          headerHeight +
+          safeIndex * workOrderHeight +
+          workOrderHeight / 2
+        );
+      }
+    }
+  
+    /*
+     * NORMAL TASK / PRESS
+     */
+    const rowTop =
+      this.getTop(row);
+  
+    const height =
+      this.getBarHeight(row);
+  
+    return (
+      machineTop +
+      rowTop +
+      height / 2
+    );
+  }
+
+
+  private isSameVisibleTask(
+    first: any,
+    second: any
+  ): boolean {
+    const firstMachine =
+      String(
+        first.AssignedMachine ||
+        first.PlannedMachine ||
+        ''
+      );
+  
+    const secondMachine =
+      String(
+        second.AssignedMachine ||
+        second.PlannedMachine ||
+        ''
+      );
+  
+    if (
+      this.isOven(first) &&
+      this.isOven(second) &&
+      first.BatchID &&
+      second.BatchID
+    ) {
+      return (
+        firstMachine === secondMachine &&
+        String(first.BatchID) ===
+          String(second.BatchID)
+      );
+    }
+  
+    return (
+      String(
+        first.PlannedTaskID ||
+        first.OperationID
+      ) ===
+      String(
+        second.PlannedTaskID ||
+        second.OperationID
+      )
+    );
+  }
+
+  private getVisibleTaskKey(
+    row: any
+  ): string {
+    const machine =
+      String(
+        row.AssignedMachine ||
+        row.PlannedMachine ||
+        ''
+      );
+  
+    if (
+      this.isOven(row) &&
+      row.BatchID
+    ) {
+      return (
+        `BATCH|${machine}|` +
+        `${String(row.BatchID)}`
+      );
+    }
+  
+    return (
+      `TASK|` +
+      `${String(
+        row.PlannedTaskID ||
+        row.OperationID
+      )}`
+    );
   }
 
   getPrecedenceLinks(): any[] {
     const links: any[] = [];
-    const grouped: any = {};
-
+  
+    const rowsByWorkOrder =
+      new Map<string, any[]>();
+  
     for (const row of this.gantt) {
-      grouped[row.WorkOrderID] = grouped[row.WorkOrderID] || [];
-      grouped[row.WorkOrderID].push(row);
+      const workOrderId =
+        String(row.WorkOrderID);
+  
+      if (!rowsByWorkOrder.has(workOrderId)) {
+        rowsByWorkOrder.set(
+          workOrderId,
+          []
+        );
+      }
+  
+      rowsByWorkOrder
+        .get(workOrderId)!
+        .push(row);
     }
+  
+    for (
+      const [
+        workOrderId,
+        workOrderRows
+      ] of rowsByWorkOrder
+    ) {
+      const sortedRows =
+        [...workOrderRows].sort(
+          (a: any, b: any) =>
+            Number(a.SequenceNumber || 0) -
+            Number(b.SequenceNumber || 0)
+        );
+  
+      /*
+       * Collapse raw rows that point to the same
+       * visible Gantt object.
+       *
+       * Oven rows in the same batch become one
+       * visible node. Normal press/task rows remain
+       * separate nodes.
+       */
+      const visibleRows: any[] = [];
+      const seenKeys =
+        new Set<string>();
+  
+      for (const row of sortedRows) {
+        const machine =
+          String(
+            row.AssignedMachine ||
+            row.PlannedMachine ||
+            ''
+          );
+  
+        const visibleKey =
+          this.isOven(row) &&
+          row.BatchID
+            ? (
+                `BATCH|${machine}|` +
+                `${String(row.BatchID)}`
+              )
+            : (
+                `TASK|` +
+                `${String(
+                  row.PlannedTaskID ||
+                  row.OperationID
+                )}`
+              );
+  
+        if (seenKeys.has(visibleKey)) {
+          continue;
+        }
+  
+        seenKeys.add(visibleKey);
+        visibleRows.push(row);
+      }
+  
+      for (
+        let index = 0;
+        index < visibleRows.length - 1;
+        index++
+      ) {
+        const from =
+          visibleRows[index];
+  
+        const to =
+          visibleRows[index + 1];
+  
+        /*
+         * Do not draw a link from a visual object
+         * back to itself.
+         */
+        if (
+          this.isSameVisibleTask(
+            from,
+            to
+          )
+        ) {
+          continue;
+        }
 
-    for (const workOrderId of Object.keys(grouped)) {
-      const rows = grouped[workOrderId].sort(
-        (a: any, b: any) =>
-          Number(a.SequenceNumber) - Number(b.SequenceNumber)
-      );
-
-      for (let i = 0; i < rows.length - 1; i++) {
-        const from = rows[i];
-        const to = rows[i + 1];
-
+        if (
+          String(workOrderId) ===
+          String(this.selectedWorkOrderId)
+        ) {
+          console.log(
+            '[ARROW LINK]',
+            `WO=${workOrderId}`,
+            `FROM Seq=${from.SequenceNumber}`,
+            `FROM Op=${from.OperationID}`,
+            `FROM Machine=${from.AssignedMachine || from.PlannedMachine}`,
+            `FROM Start=${from.StartTime}`,
+            `FROM End=${from.EndTime}`,
+            `FROM Release=${from.ReleaseTime}`,
+            '→',
+            `TO Seq=${to.SequenceNumber}`,
+            `TO Op=${to.OperationID}`,
+            `TO Machine=${to.AssignedMachine || to.PlannedMachine}`,
+            `TO Start=${to.StartTime}`,
+            `TO End=${to.EndTime}`
+          );
+        }
+  
         links.push({
           workOrderId,
-          x1: this.getRowCenterX(from, 'end'),
-          y1: this.getRowCenterY(from),
-          x2: this.getRowCenterX(to, 'start'),
-          y2: this.getRowCenterY(to)
+  
+          fromTaskId:
+            from.PlannedTaskID,
+  
+          toTaskId:
+            to.PlannedTaskID,
+
+          fromVisibleKey:
+            this.getVisibleTaskKey(from),
+          
+          toVisibleKey:
+            this.getVisibleTaskKey(to),
+  
+          x1:
+            this.getRowCenterX(
+              from,
+              'end'
+            ),
+  
+          y1:
+            this.getRowCenterY(
+              from
+            ),
+  
+          x2:
+            this.getRowCenterX(
+              to,
+              'start'
+            ),
+  
+          y2:
+            this.getRowCenterY(
+              to
+            )
         });
       }
     }
-
+  
     return links;
   }
 
-
   getVisiblePrecedenceLinks(): any[] {
-    if (!this.selectedWorkOrderId) {
-      return [];
+    const links =
+      this.getPrecedenceLinks();
+  
+    /*
+     * --------------------------------------------------
+     * SELECTED BATCH
+     * --------------------------------------------------
+     *
+     * If the whole batch itself was clicked,
+     * showing all immediate incoming/outgoing links
+     * is acceptable.
+     */
+    if (this.selectedBatch) {
+      const batchKey =
+        this.getVisibleTaskKey({
+          ...(
+            this.selectedBatch
+              .Operations?.[0] || {}
+          ),
+  
+          BatchID:
+            this.selectedBatch.BatchID,
+  
+          AssignedMachine:
+            this.selectedBatch
+              .AssignedMachine
+        });
+  
+      return links.filter(
+        link =>
+          link.fromVisibleKey ===
+            batchKey ||
+          link.toVisibleKey ===
+            batchKey
+      );
     }
   
-    return this.getPrecedenceLinks().filter(
-      link =>
-        String(link.workOrderId) ===
-        String(this.selectedWorkOrderId)
-    );
+    /*
+     * --------------------------------------------------
+     * SELECTED WORK ORDER / OPERATION
+     * --------------------------------------------------
+     *
+     * This is the important correction.
+     *
+     * A batch contains several WOs, so filtering only
+     * on visible batch key also returns arrows belonging
+     * to the OTHER WOs in the same batch.
+     *
+     * Require BOTH:
+     *
+     *   1. same WO
+     *   2. link touches selected visible operation
+     */
+    if (this.selectedRow) {
+      const rowKey =
+        this.getVisibleTaskKey(
+          this.selectedRow
+        );
+  
+      const workOrderId =
+        String(
+          this.selectedRow.WorkOrderID
+        );
+  
+      return links.filter(
+        link =>
+          String(
+            link.workOrderId
+          ) ===
+          workOrderId &&
+          (
+            link.fromVisibleKey ===
+              rowKey ||
+            link.toVisibleKey ===
+              rowKey
+          )
+      );
+    }
+  
+    /*
+     * Fallback.
+     */
+    if (this.selectedWorkOrderId) {
+      return links.filter(
+        link =>
+          String(link.workOrderId) ===
+          String(
+            this.selectedWorkOrderId
+          )
+      );
+    }
+  
+    return [];
   }
 
-  getArrowPath(link: any): string {
-    const midX = link.x1 + Math.max((link.x2 - link.x1) / 2, 24);
-
+  getArrowPath(
+    link: any
+  ): string {
+    const x1 = link.x1;
+    const y1 = link.y1;
+    const x2 = link.x2;
+    const y2 = link.y2;
+  
+    const dx =
+      x2 - x1;
+  
+    /*
+     * Forward precedence:
+     * source is left of target.
+     */
+    if (dx >= 0) {
+      const controlOffset =
+        Math.max(
+          40,
+          Math.abs(dx) * 0.45
+        );
+  
+      return `
+        M ${x1} ${y1}
+        C ${x1 + controlOffset} ${y1},
+          ${x2 - controlOffset} ${y2},
+          ${x2} ${y2}
+      `;
+    }
+  
+    /*
+     * Backward-looking precedence.
+     *
+     * This happens because the downstream Press
+     * operation can visually start before the end
+     * of the large oven batch.
+     *
+     * Do NOT create a huge right-side rectangle.
+     * Use a controlled curve instead.
+     */
+    const controlOffset =
+      Math.max(
+        45,
+        Math.min(
+          100,
+          Math.abs(dx) * 0.35
+        )
+      );
+  
     return `
-      M ${link.x1} ${link.y1}
-      C ${midX} ${link.y1},
-        ${midX} ${link.y2},
-        ${link.x2} ${link.y2}
+      M ${x1} ${y1}
+      C ${x1 + controlOffset} ${y1},
+        ${x2 + controlOffset} ${y2},
+        ${x2} ${y2}
     `;
   }
+
+
 
   selectGanttRow(event: MouseEvent, row: any): void {
     event.stopPropagation();
@@ -1193,6 +2022,8 @@ export class SolutionComponent {
     }
   
     this.selectedWorkOrderId = workOrderId;
+
+    this.selectedBatch = null;
   
     this.selectedRow =
       this.gantt.find(
@@ -1203,15 +2034,89 @@ export class SolutionComponent {
 
     this.contextMenu.visible = false;
   }
-  
 
-
-  openContextMenu(event: MouseEvent, row: any): void {
+  selectBatch(
+    event: MouseEvent,
+    batch: any
+  ): void {
     event.preventDefault();
     event.stopPropagation();
+  
+    const sameBatch =
+      String(this.selectedBatch?.BatchID) ===
+      String(batch?.BatchID) &&
+      String(
+        this.selectedBatch?.AssignedMachine
+      ) ===
+      String(batch?.AssignedMachine);
+  
+    if (sameBatch) {
+      this.clearSelection();
+      return;
+    }
+  
+    this.selectedBatch =
+      batch;
+  
+    this.selectedWorkOrderId =
+      null;
+  
+    this.selectedRow =
+      null;
+  
+    this.contextMenu.visible =
+      false;
+  
+    this.batchContextMenu.visible =
+      false;
+  }
 
+  selectOperation(
+    event: MouseEvent,
+    row: any
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+  
+    const sameTask =
+      String(
+        this.selectedRow?.PlannedTaskID
+      ) ===
+      String(row?.PlannedTaskID);
+  
+    if (sameTask) {
+      this.clearSelection();
+      return;
+    }
+  
+    this.selectedRow =
+      row;
+  
+    this.selectedBatch =
+      null;
+  
+    this.selectedWorkOrderId =
+      String(row.WorkOrderID);
+  
+    this.contextMenu.visible =
+      false;
+  
+    this.batchContextMenu.visible =
+      false;
+  }
+  
+
+  openContextMenu(
+    event: MouseEvent,
+    row: any
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+  
+    this.hideBatchTooltip();
+    this.batchContextMenu.visible = false;
     this.selectedRow = row;
-
+  
     this.contextMenu = {
       visible: true,
       x: event.clientX,
@@ -1220,7 +2125,7 @@ export class SolutionComponent {
     };
   }
 
-
+  
 
   getAvailableMachinesForRow(row: any): string[] {
     if (!row) {
@@ -1333,6 +2238,7 @@ export class SolutionComponent {
     );
   }
 
+
   unplanWorkOrder(): void {
     const row = this.contextMenu.row;
 
@@ -1388,21 +2294,34 @@ export class SolutionComponent {
     );
   }
 
+
+  isRowBeingDragged(row: any): boolean {
+    return this.dragService.getSnapshot()?.row === row;
+  }
+
   startDrag(event: MouseEvent, row: any): void {
+    if (event.button !== 0) {
+      return;
+    }
+  
+    if (!this.activeScenario?.IsManualScenario) {
+      return;
+    }
+  
     event.preventDefault();
     event.stopPropagation();
-
+  
     this.selectedRow = row;
+    this.contextMenu.visible = false;
+    this.batchContextMenu.visible = false;
+    this.hideBatchTooltip();
+    this.resetDragTarget();
+  
+    this.dragService.start(event, row);
 
-    this.dragState = {
-      row,
-      startX: event.clientX,
-      originalStart: new Date(row.StartTime).getTime(),
-      originalEnd: new Date(row.EndTime).getTime(),
-      originalBatchEnd: row.BatchEndTime
-        ? new Date(row.BatchEndTime).getTime()
-        : null,
-      originalMachine: row.AssignedMachine
+    this.dragValidation = {
+      valid: true,
+      message: 'Valid position'
     };
   }
 
@@ -1471,137 +2390,104 @@ export class SolutionComponent {
   }
   
   restoreDraggedRow(): void {
-    if (!this.dragState) {
-      return;
-    }
-  
-    this.dragState.row.StartTime =
-      new Date(this.dragState.originalStart)
-        .toISOString()
-        .replace('T', ' ')
-        .slice(0, 19);
-  
-    this.dragState.row.EndTime =
-      new Date(this.dragState.originalEnd)
-        .toISOString()
-        .replace('T', ' ')
-        .slice(0, 19);
-
-    if (this.dragState.originalBatchEnd) {
-      this.dragState.row.BatchEndTime =
-        new Date(this.dragState.originalBatchEnd)
-          .toISOString()
-          .replace('T', ' ')
-          .slice(0, 19);
-    }
-  
-    this.dragState.row.AssignedMachine =
-      this.dragState.originalMachine;
-  
-    this.dragState.row.PlannedMachine =
-      this.dragState.originalMachine;
-  
+    this.dragService.restore();
     this.recalculateLanes();
   }
 
   undoLastChange(): void {
-    if (!this.activeScenario) {
+    const currentScenario =
+      this.scenarioService.activeScenario();
+  
+    if (!currentScenario) {
+      alert('No active scenario found.');
       return;
     }
   
-    const manualChanges =
-      this.activeScenario.ManualChanges || [];
-  
-    if (!manualChanges.length) {
-      alert('No manual changes to undo.');
-      return;
-    }
-  
-    const lastChange =
-      manualChanges[manualChanges.length - 1];
-  
-    if (lastChange.ChangeType === 'MOVE') {
-      const task = this.gantt.find(
-        row => row.PlannedTaskID === lastChange.PlannedTaskID
-      );
-  
-      if (!task) {
-        alert('Could not find the task to undo.');
-        return;
-      }
-  
-      task.StartTime = lastChange.OldValue.StartTime;
-      task.EndTime = lastChange.OldValue.EndTime;
-      task.BatchEndTime = lastChange.OldValue.BatchEndTime || task.BatchEndTime;
-      task.AssignedMachine = lastChange.OldValue.Machine;
-      task.PlannedMachine = lastChange.OldValue.Machine;
-    }
-  
-    if (lastChange.ChangeType === 'MACHINE_CHANGE') {
-      const task = this.gantt.find(
-        row => row.PlannedTaskID === lastChange.PlannedTaskID
-      );
-  
-      if (!task) {
-        alert('Could not find the task to undo.');
-        return;
-      }
-  
-      task.AssignedMachine = lastChange.OldValue.Machine;
-      task.PlannedMachine = lastChange.OldValue.Machine;
-    }
+    const scenarioId =
+      currentScenario.ScenarioID;
 
-    if (lastChange.ChangeType === 'UNPLAN') {
-      if (lastChange.OldValue) {
-    
-        this.gantt.push(
-          structuredClone(lastChange.OldValue)
+      const undoResult =
+      this.manualChangeService
+        .undoLastChange(
+          currentScenario,
+          this.gantt
         );
     
-        this.plannedTasks = [...this.gantt];
-      }
+    if (!undoResult.success) {
+      alert(
+        undoResult.message
+      );
+    
+      return;
     }
+    
+    this.gantt =
+      undoResult.gantt;
+    /*
+     * Remove the restored change from history.
+     */
+    this.scenarioService
+      .removeLastManualChange(
+        scenarioId
+      );
   
-    this.activeScenario.ManualChanges =
-      manualChanges.slice(0, -1);
+    /*
+     * Clear cached batch wrappers because batch
+     * times or machines may have changed.
+     */
+    this.ganttService
+      .clearBatchCache();
   
-    this.plannedTasks = [...this.gantt];
-  
-    this.schedule = this.gantt.map(row => ({
-      WorkOrderID: row.WorkOrderID,
-      OperationID: row.OperationID,
-      AssignedMachine: row.AssignedMachine,
-      StartTime: row.StartTime,
-      EndTime: row.EndTime,
-      Late: row.ViolationReasons?.includes('LATE') || false,
-      OverSoakViolation: row.ViolationReasons?.includes('OVER_SOAK') || false
-    }));
-  
-    this.workOrderSequence = [
-      ...new Set(
-        this.gantt
-          .sort(
-            (a, b) =>
-              new Date(a.StartTime).getTime() -
-              new Date(b.StartTime).getTime()
-          )
-          .map(row => row.WorkOrderID)
-      )
+    /*
+     * Force Angular to receive new array references.
+     */
+    this.gantt = [
+      ...this.gantt
     ];
-  
-    this.scenarioService.updateScenarioTasks(
-      this.activeScenario.ScenarioID,
-      this.gantt
-    );
-  
-    this.scenarioService.saveScenarioToBackend(
-      this.activeScenario.ScenarioID
-    );
   
     this.recalculateLanes();
   
-    alert('Last manual change undone.');
+    /*
+     * Rebuild planned-task and schedule arrays.
+     */
+    this.synchronizeScheduleData();
+
+    this.workOrderSequence =
+      this.manualChangeService
+        .buildWorkOrderSequence(
+          this.gantt
+        );
+    
+    /*
+     * Update the scenario stored in the service.
+     */
+    this.scenarioService
+      .updateScenarioTasks(
+        scenarioId,
+        this.plannedTasks
+      );
+  
+    /*
+     * Refresh the local active-scenario reference.
+     */
+    this.activeScenario =
+      this.scenarioService
+        .activeScenario();
+  
+    /*
+     * Save the restored schedule and shortened
+     * manual-change history.
+     */
+    this.scenarioService
+      .saveScenarioToBackend(
+        scenarioId
+      );
+  
+    alert(
+      'Last manual change undone.'
+    );
   }
+
 
   canMoveRowToMachine(
     row: any,
@@ -1639,118 +2525,1016 @@ export class SolutionComponent {
     return true;
   }
 
+  getAvailableOvensForBatch(
+    batch: any
+  ): string[] {
+    const currentMachine =
+      batch?.AssignedMachine ||
+      batch?.MachineID ||
+      batch?.Machine;
+  
+    return this.getMachines().filter(
+      machine =>
+        machine !== currentMachine &&
+        this.isOven(machine)
+    );
+  }
+
+  changeBatchMachine(
+    batch: any,
+    newMachine: string
+  ): void {
+    if (
+      !batch ||
+      !newMachine ||
+      !this.activeScenario
+    ) {
+      return;
+    }
+  
+    const operations =
+      batch.Operations || [];
+  
+    if (!operations.length) {
+      return;
+    }
+  
+    const oldMachine =
+      operations[0].AssignedMachine ||
+      operations[0].PlannedMachine;
+  
+    for (const row of operations) {
+      row.AssignedMachine = newMachine;
+      row.PlannedMachine = newMachine;
+      row.IsManual = true;
+      row.Source = 'MANUAL';
+    }
+  
+    const conflictingRow =
+      operations.find((row: any) =>
+        this.doesTaskOverlapDowntime(row)
+      );
+  
+    if (conflictingRow) {
+      for (const row of operations) {
+        row.AssignedMachine = oldMachine;
+        row.PlannedMachine = oldMachine;
+      }
+  
+      alert(
+        `Batch cannot be moved to ${newMachine} ` +
+        `because it overlaps downtime.`
+      );
+  
+      this.recalculateLanes();
+      return;
+    }
+  
+    this.synchronizeScheduleData();
+  
+    this.scenarioService.updateScenarioTasks(
+      this.activeScenario.ScenarioID,
+      this.plannedTasks
+    );
+  
+    this.scenarioService.addManualChange(
+      this.activeScenario.ScenarioID,
+      {
+        ChangeType: 'BATCH_MACHINE_CHANGE',
+        BatchID: batch.BatchID,
+        OldValue: {
+          Machine: oldMachine
+        },
+        NewValue: {
+          Machine: newMachine
+        },
+        Note:
+          `Planner moved batch ${batch.BatchID} ` +
+          `from ${oldMachine} to ${newMachine}.`
+      }
+    );
+  
+    this.scenarioService.saveScenarioToBackend(
+      this.activeScenario.ScenarioID
+    );
+  
+    this.batchContextMenu.visible = false;
+    this.recalculateLanes();
+  }
+
+  unplanBatch(): void {
+    const batch =
+      this.batchContextMenu.batch;
+  
+    if (!batch || !this.activeScenario) {
+      return;
+    }
+  
+    const batchId = batch.BatchID;
+  
+    const removedRows =
+      this.gantt.filter(
+        row => row.BatchID === batchId
+      );
+  
+    this.gantt =
+      this.gantt.filter(
+        row => row.BatchID !== batchId
+      );
+  
+    this.synchronizeScheduleData();
+  
+    this.scenarioService.updateScenarioTasks(
+      this.activeScenario.ScenarioID,
+      this.plannedTasks
+    );
+  
+    this.scenarioService.addManualChange(
+      this.activeScenario.ScenarioID,
+      {
+        ChangeType: 'BATCH_UNPLAN',
+        BatchID: batchId,
+        OldValue:
+          structuredClone(removedRows),
+        NewValue: null,
+        Note:
+          `Planner manually unplanned batch ${batchId}.`
+      }
+    );
+  
+    this.scenarioService.saveScenarioToBackend(
+      this.activeScenario.ScenarioID
+    );
+  
+    this.batchContextMenu.visible = false;
+    this.recalculateLanes();
+  }
+
+  getMachineAtPointer(
+    event: MouseEvent
+  ): string | null {
+    const elements = document.elementsFromPoint(
+      event.clientX,
+      event.clientY
+    ) as HTMLElement[];
+  
+    for (const element of elements) {
+      const machineElement =
+        element.closest<HTMLElement>(
+          '[data-gantt-machine]'
+        );
+  
+      const machine =
+        machineElement?.dataset['ganttMachine'];
+  
+      if (machine) {
+        return machine;
+      }
+    }
+  
+    return null;
+  }
+
+  doesTaskOverlapDowntimeOnMachine(
+    row: any,
+    machine: string
+  ): boolean {
+    return this.schedulingEngine
+      .doesTaskOverlapDowntimeOnMachine(
+        row,
+        machine,
+        this.getDowntimesForMachine(
+          machine
+        )
+      );
+  }
+
+
+  private pushBatchesForwardTransaction(
+    batchDrag: any,
+    targetMachine: string
+  ): BatchPushResult {
+    return this.schedulingEngine
+      .pushBatchesForwardTransaction({
+        batchDrag,
+        targetMachine,
+        gantt: this.gantt,
+  
+        targetBatches:
+          this.getBatchGroupsForMachine(
+            targetMachine
+          ),
+  
+        downtimes:
+          this.getDowntimesForMachine(
+            targetMachine
+          )
+      });
+  }
+
+
+  doesBatchOverlapOnMachine(
+    batchDrag: any,
+    machine: string
+  ): boolean {
+    return this.schedulingEngine
+      .doesBatchOverlapOnMachine(
+        batchDrag,
+        this.getBatchGroupsForMachine(
+          machine
+        )
+      );
+  }
+  
+  evaluateRowDragTarget(
+    event: MouseEvent,
+    row: any
+  ): void {
+    const machine =
+      this.getMachineAtPointer(event);
+  
+    if (!machine) {
+      this.dragTarget = {
+        machine: null,
+        valid: false,
+        message: 'Move over a machine row'
+      };
+  
+      return;
+    }
+  
+    if (!this.canMoveRowToMachine(row, machine)) {
+      this.dragTarget = {
+        machine,
+        valid: false,
+        message:
+          `Operation cannot run on ${machine}`
+      };
+  
+      return;
+    }
+  
+    const downtimeConflict =
+      this.doesTaskOverlapDowntimeOnMachine(
+        row,
+        machine
+      );
+  
+    this.dragTarget = downtimeConflict
+      ? {
+          machine,
+          valid: false,
+          message:
+            `Downtime conflict on ${machine}`
+        }
+      : {
+          machine,
+          valid: true,
+          message:
+            `Drop on ${machine}`
+        };
+  }
+
+  evaluateBatchDragTarget(
+    event: MouseEvent,
+    batchDrag: any
+  ): void {
+    const machine =
+      this.getMachineAtPointer(event);
+  
+    if (!machine) {
+      this.dragTarget = {
+        machine: null,
+        valid: false,
+        message:
+          'Move over an oven row'
+      };
+  
+      return;
+    }
+  
+    if (!this.isOven(machine)) {
+      this.dragTarget = {
+        machine,
+        valid: false,
+        message:
+          `Batch cannot run on ${machine}`
+      };
+  
+      return;
+    }
+  
+    const conflictingRow =
+      batchDrag.rows
+        .map(
+          (item: any) =>
+            item.row
+        )
+        .find(
+          (row: any) =>
+            this.doesTaskOverlapDowntimeOnMachine(
+              row,
+              machine
+            )
+        );
+  
+    if (conflictingRow) {
+      this.dragTarget = {
+        machine,
+        valid: false,
+        message:
+          `Downtime conflict on ${machine}`
+      };
+  
+      return;
+    }
+  
+    const overlapsBatch =
+      this.doesBatchOverlapOnMachine(
+        batchDrag,
+        machine
+      );
+  
+    this.dragTarget = {
+      machine,
+      valid: true,
+      message: overlapsBatch
+        ? `Drop and push later batches on ${machine}`
+        : `Drop batch on ${machine}`
+    };
+  
+    /*
+     * Live cross-oven preview.
+     */
+    for (const item of batchDrag.rows) {
+      item.row.AssignedMachine =
+        machine;
+  
+      item.row.PlannedMachine =
+        machine;
+    }
+  
+    batchDrag.batch.AssignedMachine =
+      machine;
+  }
+  
+  trackBatch(
+    index: number,
+    batch: any
+  ): string {
+    return String(
+      batch?.AssignedMachine || ''
+    ) + '_' + String(batch?.BatchID || index);
+  }
+
+  private autoScrollWhileDragging(
+      event: MouseEvent
+  ): void {
+
+      if (!this.ganttBoard) {
+          return;
+      }
+
+      const board =
+          this.ganttBoard.nativeElement;
+
+      const rect =
+          board.getBoundingClientRect();
+
+      const edge = 80;
+      const speed = 20;
+
+      if (
+          event.clientX <
+          rect.left + edge
+      ) {
+          board.scrollLeft -= speed;
+      }
+
+      if (
+          event.clientX >
+          rect.right - edge
+      ) {
+          board.scrollLeft += speed;
+      }
+  }
+
   @HostListener('document:mousemove', ['$event'])
   onMouseMove(event: MouseEvent): void {
-    if (!this.dragState) return;
+    if (this.dragService.isBatchDragging()) {
+      const batchDrag =
+        this.dragService.getBatchSnapshot();
 
-    const deltaX = event.clientX - this.dragState.startX;
-    const deltaHours = deltaX / this.pixelsPerHour;
-    const deltaMs = deltaHours * 60 * 60 * 1000;
+      if (!batchDrag) {
+        return;
+      }
 
-    const newStart = new Date(this.dragState.originalStart + deltaMs);
-    const newEnd = new Date(this.dragState.originalEnd + deltaMs);
+      const changed =
+        this.dragService.moveBatch(
+          event.clientX,
+          event.clientY,
+          this.pixelsPerHour
+        );
 
-    this.dragState.row.StartTime = newStart.toISOString().replace('T', ' ').slice(0, 19);
-    this.dragState.row.EndTime = newEnd.toISOString().replace('T', ' ').slice(0, 19);
+        this.autoScrollWhileDragging(event);
 
-    if (this.dragState.originalBatchEnd) {
-      const newBatchEnd = new Date(this.dragState.originalBatchEnd + deltaMs);
-      this.dragState.row.BatchEndTime = newBatchEnd.toISOString().replace('T', ' ').slice(0, 19);
+      if (!changed) {
+        return;
+      }
+
+      this.evaluateBatchDragTarget(
+        event,
+        batchDrag
+      );
+
+      this.dragValidation = {
+        valid: this.dragTarget.valid,
+        message: this.dragTarget.message
+      };
+
+      this.recalculateLanes();
+      return;
     }
+
+    const changed =
+      this.dragService.move(
+        event.clientX,
+        event.clientY,
+        this.pixelsPerHour
+      );
+
+      this.autoScrollWhileDragging(event);
+
+    if (!changed) {
+      return;
+    }
+
+    const drag =
+      this.dragService.getSnapshot();
+
+    if (!drag) {
+      return;
+    }
+
+    this.evaluateRowDragTarget(
+      event,
+      drag.row
+    );
+
+    this.dragValidation = {
+      valid: this.dragTarget.valid,
+      message: this.dragTarget.message
+    };
 
     this.recalculateLanes();
   }
 
-  @HostListener('document:mouseup')
-    onMouseUp(): void {
 
-      if (!this.dragState) {
-        return;
+  
+  @HostListener('window:wheel' , ['$event'])
+  preventBrowserZoom(event: WheelEvent) {
+
+      if (event.ctrlKey || event.metaKey) {
+
+          event.preventDefault();
+
       }
 
-      if (!this.activeScenario) {
-        this.dragState = null;
-        return;
-      }
+  }
 
-      const row = this.dragState.row;
+  resetDragValidation(): void {
+    this.dragValidation = {
+      valid: true,
+      message: ''
+    };
+  }
 
-      const overlappingDowntime =
-        this.getOverlappingDowntime(row);
+  resetDragTarget(): void {
+    this.dragTarget = {
+      machine: null,
+      valid: true,
+      message: ''
+    };
+  }
+  
+  synchronizeScheduleData(): void {
+    this.plannedTasks = this.gantt.map(
+      task => ({
+        ...task,
+        PlannedMachine:
+          task.AssignedMachine ||
+          task.PlannedMachine
+      })
+    );
+  
+    this.schedule = this.gantt.map(
+      task => ({
+        WorkOrderID: task.WorkOrderID,
+        OperationID: task.OperationID,
+        BatchID: task.BatchID,
+        AssignedMachine:
+          task.AssignedMachine ||
+          task.PlannedMachine,
+        StartTime: task.StartTime,
+        EndTime: task.EndTime,
+        BatchEndTime:
+          task.BatchEndTime || null,
+        Late:
+          task.ViolationReasons?.includes(
+            'LATE'
+          ) || false,
+        OverSoakViolation:
+          task.ViolationReasons?.includes(
+            'OVER_SOAK'
+          ) || false
+      })
+    );
+  }
 
-      if (overlappingDowntime) {
-        alert(
-          'Move rejected. Task overlaps downtime on ' +
-          overlappingDowntime.MachineID +
-          ' from ' +
-          overlappingDowntime.StartTime +
-          ' to ' +
-          overlappingDowntime.EndTime +
-          '.'
+  private validateBatchMove(
+    batchDrag: any
+  ): boolean {
+  
+    if (!batchDrag.moved) {
+      this.dragService.cancelBatch();
+      this.resetDragTarget();
+      this.resetDragValidation();
+      return false;
+    }
+  
+    if (!this.activeScenario) {
+      this.dragService.restoreBatch();
+      this.dragService.cancelBatch();
+      this.resetDragValidation();
+      return false;
+    }
+  
+    if (
+      !this.dragTarget.machine ||
+      !this.dragTarget.valid
+    ) {
+      alert(
+        this.dragTarget.message ||
+        'Invalid batch drop position.'
+      );
+  
+      this.dragService.restoreBatch();
+      this.dragService.cancelBatch();
+      this.recalculateLanes();
+      this.resetDragTarget();
+      this.resetDragValidation();
+  
+      return false;
+    }
+  
+    return true;
+  }
+
+  private executeBatchMove(
+    batchDrag: any
+  ): {
+    success: boolean;
+    pushResult?: BatchPushResult;
+  } {
+
+    const targetMachine =
+      this.dragTarget.machine;
+
+    if (!targetMachine) {
+      return {
+        success: false
+      };
+    }
+  
+    for (const item of batchDrag.rows) {
+  
+      item.row.AssignedMachine =
+        targetMachine;
+  
+      item.row.PlannedMachine =
+        targetMachine;
+    }
+  
+    batchDrag.batch.AssignedMachine =
+      targetMachine;
+  
+  
+    const conflictingRow =
+      batchDrag.rows
+        .map((item: any) => item.row)
+        .find((row: any) =>
+          this.doesTaskOverlapDowntime(row)
         );
+  
+    if (conflictingRow) {
+  
+      const downtime =
+        this.getOverlappingDowntime(
+          conflictingRow
+        );
+  
+      alert(
+        'Batch move rejected. Batch overlaps downtime on ' +
+        `${downtime?.MachineID || conflictingRow.AssignedMachine}.`
+      );
+  
+      this.dragService.restoreBatch();
+  
+      this.dragService.cancelBatch();
+  
+      this.recalculateLanes();
+  
+      this.resetDragTarget();
+  
+      this.resetDragValidation();
+  
+      return {
+        success: false
+      };
+    }
+  
+    const pushResult =
+      this.pushBatchesForwardTransaction(
+        batchDrag,
+        targetMachine
+      );
+  
+    if (!pushResult.success) {
+  
+      alert(pushResult.message);
+  
+      this.dragService.restoreBatch();
+  
+      this.dragService.cancelBatch();
+  
+      this.recalculateLanes();
+  
+      this.resetDragTarget();
+  
+      this.resetDragValidation();
+  
+      return {
+        success: false
+      };
+    }
+  
+    for (const item of batchDrag.rows) {
+  
+      item.row.IsManual = true;
+  
+      item.row.Source = 'MANUAL';
+    }
+  
+    for (
+      const pushedSnapshot of
+      pushResult.pushedRows
+    ) {
+  
+      pushedSnapshot.row.IsManual = true;
+  
+      pushedSnapshot.row.Source = 'MANUAL';
+    }
+  
+    return {
+  
+      success: true,
+  
+      pushResult
+  
+    };
+  
+  }
 
-        this.restoreDraggedRow();
-        this.dragState = null;
+
+  private finalizeBatchMove(
+    scenarioId: string
+  ): void {
+  
+    this.activeScenario =
+      this.scenarioService.activeScenario();
+  
+    this.scenarioService.saveScenarioToBackend(
+      scenarioId
+    );
+  
+    this.gantt = [
+      ...this.gantt
+    ];
+  
+    this.plannedTasks = [
+      ...this.gantt
+    ];
+  
+    this.dragService.finishBatch();
+  
+    this.resetDragTarget();
+  
+    this.recalculateLanes();
+  
+    this.resetDragValidation();
+  }
+
+  finishBatchDrag(batchDrag: any): void {
+    if (
+        !this.validateBatchMove(
+            batchDrag
+        )
+    ) {
         return;
-      }
+    }
+    
+    const scenarioId =
+        this.activeScenario!.ScenarioID;
 
-      this.scenarioService.updateScenarioTasks(
-        this.activeScenario.ScenarioID,
-        this.gantt
-      );
+    const execution =
+        this.executeBatchMove(
+            batchDrag
+        );
+    
+    if (!execution.success) {
+        return;
+    }
+    
+    const pushResult =
+        execution.pushResult!;
+    
+    this.synchronizeScheduleData();
+  
+    this.scenarioService.updateScenarioTasks(
+      scenarioId,
+      this.plannedTasks
+    );
 
-      this.scenarioService.addManualChange(
-        this.activeScenario.ScenarioID,
-        {
-          ChangeType: 'MOVE',
-          PlannedTaskID: row.PlannedTaskID,
-          WorkOrderID: row.WorkOrderID,
-          OperationID: row.OperationID,
+    this.manualChangeService
+      .recordBatchMove({
+        scenarioId,
+        batchDrag,
+        pushResult,
 
-          OldValue: {
-            StartTime: new Date(this.dragState.originalStart)
-              .toISOString()
-              .replace('T', ' ')
-              .slice(0, 19),
+        formatDateTime:
+          value =>
+            this.dragService
+              .formatDateTime(value)
+      });
 
-            EndTime: new Date(this.dragState.originalEnd)
-              .toISOString()
-              .replace('T', ' ')
-              .slice(0, 19),
 
-            BatchEndTime: this.dragState.originalBatchEnd
-              ? new Date(this.dragState.originalBatchEnd)
-                .toISOString()
-                .replace('T', ' ')
-                .slice(0, 19)
-              : null,
+    this.finalizeBatchMove(
+      scenarioId
+    );
+  
+  }
 
-            Machine: this.dragState.originalMachine,
-          },
 
-          NewValue: {
-            StartTime: row.StartTime,
-            EndTime: row.EndTime,
-            BatchEndTime: row.BatchEndTime || null,
-            Machine: row.AssignedMachine,
-          },
+  @HostListener('document:mouseup')
+  onMouseUp(): void {
 
-          Note: 'Planner manually moved task.'
-        }
-      );
+    const batchDrag =
+      this.dragService.getBatchSnapshot();
 
-      this.scenarioService.saveScenarioToBackend(
-        this.activeScenario.ScenarioID
-      );
-
-      this.dragState = null;
+    if (batchDrag) {
+      this.finishBatchDrag(batchDrag);
+      return;
     }
 
-    clearSelection(): void {
+    const drag = this.dragService.getSnapshot();
+
+    if (!drag) {
+      return;
+    }
+
+
+    if (!drag.moved) {
+      this.dragService.cancel();
+      this.resetDragTarget();
+      this.resetDragValidation();
+      return;
+    }
+
+    if (!this.activeScenario) {
+      this.restoreDraggedRow();
+      this.dragService.cancel();
+      return;
+    }
+
+    const row = drag.row;
+
+    if (
+      !this.dragTarget.machine ||
+      !this.dragTarget.valid
+    ) {
+      alert(
+        this.dragTarget.message ||
+        'Invalid drop position.'
+      );
+    
+      this.restoreDraggedRow();
+      this.dragService.cancel();
+      this.resetDragTarget();
+      this.resetDragValidation();
+      return;
+    }
+    
+    row.AssignedMachine =
+      this.dragTarget.machine;
+    
+    row.PlannedMachine =
+      this.dragTarget.machine;
+
+    const overlappingDowntime = this.getOverlappingDowntime(row);
+
+    if (overlappingDowntime) {
+      alert(
+        'Move rejected. Task overlaps downtime on ' +
+        overlappingDowntime.MachineID +
+        ' from ' +
+        overlappingDowntime.StartTime +
+        ' to ' +
+        overlappingDowntime.EndTime +
+        '.'
+      );
+
+      this.restoreDraggedRow();
+      this.dragService.cancel();
+      return;
+    }
+
+    row.IsManual = true;
+    row.Source = 'MANUAL';
+
+    this.plannedTasks = this.gantt.map(task => ({
+      ...task,
+      PlannedMachine: task.AssignedMachine || task.PlannedMachine
+    }));
+
+    this.schedule = this.gantt.map(task => ({
+      WorkOrderID: task.WorkOrderID,
+      OperationID: task.OperationID,
+      BatchID: task.BatchID,
+      AssignedMachine: task.AssignedMachine || task.PlannedMachine,
+      StartTime: task.StartTime,
+      EndTime: task.EndTime,
+      Late: task.ViolationReasons?.includes('LATE') || false,
+      OverSoakViolation: task.ViolationReasons?.includes('OVER_SOAK') || false
+    }));
+
+    this.scenarioService.updateScenarioTasks(
+      this.activeScenario.ScenarioID,
+      this.plannedTasks
+    );
+
+    this.scenarioService.addManualChange(
+      this.activeScenario.ScenarioID,
+      {
+        ChangeType: 'MOVE',
+        PlannedTaskID: row.PlannedTaskID,
+        WorkOrderID: row.WorkOrderID,
+        OperationID: row.OperationID,
+        OldValue: {
+          StartTime: this.dragService.formatDateTime(drag.originalStart),
+          EndTime: this.dragService.formatDateTime(drag.originalEnd),
+          HeatingEndTime: drag.originalHeatingEnd !== null
+            ? this.dragService.formatDateTime(drag.originalHeatingEnd)
+            : null,
+          BatchEndTime: drag.originalBatchEnd !== null
+            ? this.dragService.formatDateTime(drag.originalBatchEnd)
+            : null,
+          ReleaseTime: drag.originalReleaseTime !== null
+            ? this.dragService.formatDateTime(drag.originalReleaseTime)
+            : null,
+          Machine: drag.originalMachine
+        },
+        NewValue: {
+          StartTime: row.StartTime,
+          EndTime: row.EndTime,
+          HeatingEndTime: row.HeatingEndTime || null,
+          BatchEndTime: row.BatchEndTime || null,
+          ReleaseTime: row.ReleaseTime || null,
+          Machine: row.AssignedMachine
+        },
+        Note: 'Planner manually moved task.'
+      }
+    );
+
+    this.scenarioService.saveScenarioToBackend(
+      this.activeScenario.ScenarioID
+    );
+
+    this.dragService.finish();
+    this.dragValidation = {
+      valid: true,
+      message: ''
+    };
+
+    this.recalculateLanes();
+  }
+
+  clearSelection(): void {
       this.selectedRow = null;
+      this.selectedBatch = null;
       this.selectedWorkOrderId = null;
       this.contextMenu.visible = false;
+      this.batchContextMenu.visible = false;
+  }
+
+  clearSelectionFromGantt(
+    event: MouseEvent
+  ): void {
+    const target =
+      event.target as HTMLElement;
+  
+    if (
+      target.closest(
+        '.batch-container'
+      ) ||
+      target.closest(
+        '.gantt-bar'
+      ) ||
+      target.closest(
+        '.batch-operation-button'
+      ) ||
+      target.closest(
+        '.context-menu'
+      )
+    ) {
+      return;
     }
+  
+    this.clearSelection();
+  }
+
+  openBatchContextMenu(
+    event: MouseEvent,
+    batch: any
+  ): void {
+    event.preventDefault();
+    event.stopPropagation();
+  
+    if (!this.activeScenario?.IsManualScenario) {
+      return;
+    }
+  
+    this.hideBatchTooltip();
+    this.contextMenu.visible = false;
+  
+    this.batchContextMenu = {
+      visible: true,
+      x: event.clientX,
+      y: event.clientY,
+      batch
+    };
+  }
+
+  startBatchDrag(
+    event: MouseEvent,
+    batch: any
+  ): void {
+
+    
+    if (event.button !== 0) {
+      return;
+    }
+  
+    if (!this.activeScenario?.IsManualScenario) {
+      return;
+    }
+  
+    if (!batch?.Operations?.length) {
+      return;
+    }
+  
+    event.preventDefault();
+    event.stopPropagation();
+  
+    this.contextMenu.visible = false;
+    this.batchContextMenu.visible = false;
+    this.hideBatchTooltip();
+  
+    this.resetDragTarget();
+  
+    this.dragValidation = {
+      valid: true,
+      message: 'Move batch over an oven row'
+    };
+  
+    this.dragService.startBatch(
+      event,
+      batch
+    );
+
+
+  }
+  
+
+  isBatchBeingDragged(batch: any): boolean {
+    return (
+      this.dragService
+        .getBatchSnapshot()
+        ?.batch
+        ?.BatchID === batch?.BatchID
+    );
+  }
+
+
 
   @HostListener('document:click', ['$event'])
     closeContextMenu(event: MouseEvent): void {
@@ -1763,6 +3547,7 @@ export class SolutionComponent {
     
         this.contextMenu.visible = false;
         this.hideBatchTooltip();
+        this.batchContextMenu.visible = false;
     }
 
   @HostListener('document:scroll')

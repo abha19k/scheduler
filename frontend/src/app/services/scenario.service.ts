@@ -1,13 +1,24 @@
 import { Injectable, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 
+export type ManualChangeType =
+| 'MOVE' 
+| 'RESIZE' 
+| 'UNPLAN' 
+| 'MACHINE_CHANGE' 
+| 'BATCH_MOVE' 
+| 'BATCH_MACHINE_CHANGE' 
+| 'BATCH_UNPLAN';
+
 export interface ManualChange {
   ManualChangeID: string;
   ScenarioID: string;
   PlannedTaskID?: string;
   WorkOrderID?: string;
   OperationID?: string;
-  ChangeType: 'MOVE' | 'RESIZE' | 'UNPLAN' | 'MACHINE_CHANGE';
+  BatchID?: string;
+  ChangeType: ManualChangeType;
+
   OldValue?: any;
   NewValue?: any;
   ChangedBy?: string;
@@ -233,6 +244,53 @@ export class ScenarioService {
       this.importedDataKey,
       JSON.stringify(data)
     );
+  }
+
+  removeLastManualChange(
+    scenarioId: string
+  ): void {
+    this.scenarios.update(list =>
+      list.map(scenario => {
+        if (
+          scenario.ScenarioID !==
+          scenarioId
+        ) {
+          return scenario;
+        }
+  
+        return {
+          ...scenario,
+          ManualChanges: (
+            scenario.ManualChanges || []
+          ).slice(0, -1)
+        };
+      })
+    );
+  
+    const active =
+      this.activeScenario();
+  
+    if (
+      active?.ScenarioID ===
+      scenarioId
+    ) {
+      this.activeScenario.update(
+        scenario => {
+          if (!scenario) {
+            return null;
+          }
+  
+          return {
+            ...scenario,
+            ManualChanges: (
+              scenario.ManualChanges || []
+            ).slice(0, -1)
+          };
+        }
+      );
+    }
+  
+    this.saveScenarioResults();
   }
 
   saveScenarioDefinitionToBackend(

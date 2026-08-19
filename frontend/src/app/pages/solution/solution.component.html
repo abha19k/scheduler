@@ -66,7 +66,15 @@
     <div class="scenario-meta" *ngIf="activeScenario">
       <span>ID: {{ activeScenario.ScenarioID }}</span>
       <span>Manual: {{ activeScenario.IsManualScenario ? 'Yes' : 'No' }}</span>
-      <span>Changes: {{ activeScenario.ManualChanges?.length || 0 }}</span>
+      <span>
+        Changes:
+        {{
+          scenarioService
+            .activeScenario()
+            ?.ManualChanges
+            ?.length || 0
+        }}
+      </span>
     </div>
 
     <div class="scenario-actions">
@@ -83,8 +91,13 @@
         class="undo-btn"
         (click)="undoLastChange()"
         [disabled]="
-          !activeScenario ||
-          !(activeScenario.ManualChanges?.length)
+          !scenarioService.activeScenario() ||
+          !(
+            scenarioService
+              .activeScenario()
+              ?.ManualChanges
+              ?.length
+          )
         "
       >
         Undo Last Change
@@ -182,9 +195,22 @@
       </div>
     </div>
 
+    <div
+      class="manual-mode-status"
+      [class.enabled]="activeScenario?.IsManualScenario"
+    >
+      {{
+        activeScenario?.IsManualScenario
+          ? 'Manual mode enabled'
+          : 'Read-only optimizer result'
+      }}
+    </div>
+
   
     <div
+      #ganttBoard
       class="gantt-board"
+      (wheel)="onGanttWheel($event)"
       *ngIf="gantt.length; else noGantt"
     >
       <button
@@ -198,6 +224,7 @@
       <div
         class="gantt-content"
         [style.width.px]="110 + getTimelineWidth()"
+        (click)="clearSelectionFromGantt($event)"
       >
         <div class="timeline-corner">
           Machine
@@ -270,8 +297,19 @@
         <div
           class="gantt-machine-row"
           *ngFor="let machine of getMachines()"
+          [attr.data-gantt-machine]="machine"
+          [class.drop-target]="dragTarget.machine === machine"
+          [class.drop-target-valid]="
+            dragTarget.machine === machine &&
+            dragTarget.valid
+          "
+          [class.drop-target-invalid]="
+            dragTarget.machine === machine &&
+            !dragTarget.valid
+          "
           [style.minHeight.px]="getMachineHeight(machine)"
         >
+
           <div class="machine-label">
             {{ machine }}
           </div>
@@ -287,6 +325,29 @@
               [style.left.px]="tick.left"
             >
             </div>
+
+            <div
+                class="current-time-line"
+                *ngIf="getCurrentTimeLeft() !== null"
+                [style.left.px]="getCurrentTimeLeft()"
+            >
+                <span>Now</span>
+            </div>
+
+            <div
+                class="milestone-line due-line"
+                *ngFor="let milestone of getMilestones()"
+                [style.left.px]="milestone.left"
+                [title]="
+                  'Due Date\n' +
+                  milestone.workOrders.join(', ')
+                "
+            >
+                <span>
+                  {{ milestone.workOrders.length }}
+                </span>
+            </div>
+
             <div
               class="downtime-block"
               *ngFor="let downtime of getDowntimesForMachine(machine)"
@@ -305,19 +366,80 @@
 
             <ng-container *ngIf="isOven(machine)">
 
+              <div
+                class="oven-setup-block"
+                *ngFor="
+                  let batch of
+                  getBatchGroupsForMachine(machine);
+                  trackBy: trackBatch
+                "
+                [style.left.px]="getBatchSetupLeft(batch)"
+                [style.width.px]="getBatchSetupWidth(batch)"
+                [style.height.px]="getBatchHeight(batch)"
+                [style.display]="
+                  getBatchSetupWidth(batch) > 0
+                    ? 'block'
+                    : 'none'
+                "
+                [title]="
+                  'Setup'
+                  + '\nBatch: ' + batch.BatchID
+                  + '\nStart: ' + formatTooltipDate(getBatchSetupStart(batch))
+                  + '\nEnd: ' + formatTooltipDate(batch.StartTime)
+                  + '\nDuration: ' + formatMinutes(getBatchSetupMinutes(batch))
+                "
+              >
+                <span
+                  *ngIf="getBatchSetupWidth(batch) >= 45"
+                >
+                  Setup
+                </span>
+              </div>
+
 
               <div
                 class="batch-container"
-                *ngFor="let batch of getBatchGroupsForMachine(machine)"
+                *ngFor="
+                  let batch of
+                  getBatchGroupsForMachine(machine);
+                  trackBy: trackBatch
+                "
+
+                [class.draggable]="
+                  activeScenario?.IsManualScenario
+                "
+
+                [class.dragging]="
+                  isBatchBeingDragged(batch)
+                "
+
+                [class.drag-valid]="
+                  isBatchBeingDragged(batch) &&
+                  dragValidation.valid
+                "
+
+                [class.drag-invalid]="
+                  isBatchBeingDragged(batch) &&
+                  !dragValidation.valid
+                "
 
                 [style.left.px]="getBatchLeft(batch)"
                 [style.width.px]="getBatchWidth(batch)"
                 [style.height.px]="getBatchHeight(batch)"
-                (mouseenter)="showBatchTooltip($event,batch)"
-                (mousemove)="moveBatchTooltip($event)"
+
+
+                (mousedown)="startBatchDrag($event, batch)"
+                (click)="selectBatch($event, batch)"
+                (contextmenu)="
+                  openBatchContextMenu($event, batch)
+                "
+
+                (mouseenter)="
+                  showBatchTooltip($event, batch)
+                "
+
                 (mouseleave)="scheduleHideBatchTooltip()"
               >
-
                 <div
                   class="oversoak-layer"
                   *ngIf="getOverSoakWidth(batch) > 0"
@@ -336,16 +458,26 @@
                 <div
                   class="heating-end-marker"
                   [style.left.px]="getHeatingWidth(batch)"
-              ></div>
+                ></div>
 
                 <div
                   class="heating-card"
+                  [class.manual-operation]="isManualBatch(batch)"
                   [style.width.px]="getHeatingWidth(batch)"
                   [style.height.px]="getBatchHeight(batch)"
                 >
-                  <div class="batch-header">
-                    {{ getOperationShortName(batch) }}
-                    · {{ getBatchWoCount(batch) }} WO
+                  <div
+                    class="batch-header batch-drag-handle"
+                    (mousedown)="startBatchDrag($event, batch)"
+                  >
+                    <span class="batch-id">
+                      {{ batch.BatchID }}
+                    </span>
+                  
+                    <span class="batch-summary">
+                      {{ getOperationShortName(batch) }}
+                      · {{ getBatchWoCount(batch) }} WO
+                    </span>
                   </div>
 
                   <button
@@ -361,14 +493,20 @@
                       isWorkOrderDimmed(op.WorkOrderID)
                     "
 
+                    (mousedown)="$event.stopPropagation()"
                     (pointerdown)="$event.stopPropagation()"
-                    (click)="selectWorkOrderById($event, op.WorkOrderID)"
+
+                    (click)="
+                      selectWorkOrderById(
+                        $event,
+                        op.WorkOrderID
+                      )
+                    "
                   >
                     WO {{ op.WorkOrderID }}
                   </button>
                 </div>
               </div>
-            
             
             </ng-container>
 
@@ -382,9 +520,21 @@
 
               [class.oven-bar]="isOven(row)"
               [class.press-bar]="isPress(row)"
+              [class.manual-operation]="
+                row.IsManual === true ||
+                row.Source === 'MANUAL'
+              "
               [class.selected-bar]="selectedRow?.OperationID === row.OperationID"
+              [class.dragging]="isRowBeingDragged(row)"
+              [class.draggable]="activeScenario?.IsManualScenario"
 
+              [class.drag-valid]="
+                isRowBeingDragged(row) && dragValidation.valid
+              "
 
+              [class.drag-invalid]="
+                isRowBeingDragged(row) && !dragValidation.valid
+              "
               [class.selected-workorder]="
                 isWorkOrderSelected(row.WorkOrderID)
               "
@@ -398,8 +548,8 @@
               [style.top.px]="getTop(row)"
               [style.height.px]="getBarHeight(row)"
               
-              (pointerdown)="$event.stopPropagation()"
-              (click)="selectWorkOrderById($event, row.WorkOrderID)"
+              (mousedown)="startDrag($event, row)"
+              (click)="selectOperation($event, row)"
               (contextmenu)="openContextMenu($event, row)"
               >
 
@@ -439,12 +589,12 @@
             <th>Machine</th>
             <th>Start</th>
             <th>End</th>
-            <th>Batch End</th>
-            <th>Manual</th>
-            <th>Violation</th>
             <th>Heating End</th>
             <th>Batch End</th>
             <th>Waiting (min)</th>
+            <th>Manual</th>
+            <th>Violation</th>
+
           </tr>
         </thead>
 
@@ -457,25 +607,22 @@
             <td>{{ row.PlannedMachine || row.AssignedMachine }}</td>
             <td>{{ row.StartTime }}</td>
             <td>{{ row.EndTime }}</td>
+            <td>{{ row.HeatingEndTime || '-' }}</td>
             <td>{{ row.BatchEndTime || '-' }}</td>
-            <td>{{ row.IsManual }}</td>
-            <td>{{ row.ViolationStatus }}</td>
-            <td>{{ row.HeatingEndTime }}</td>
-
-            <td>{{ row.BatchEndTime }}</td>
             <td>
               {{
                 getBatchWaitingMinutes({
                   HeatingEndTime: row.HeatingEndTime,
                   BatchEndTime: row.BatchEndTime
-
                 })
               }}
             </td>
+            <td>{{ row.IsManual }}</td>
+            <td>{{ row.ViolationStatus }}</td>
           </tr>
 
           <tr *ngIf="!plannedTasks.length">
-            <td colspan="9" class="empty-text">
+            <td colspan="12" class="empty-text">
               No planned tasks yet.
             </td>
           </tr>
@@ -522,7 +669,7 @@
 
   <div
     class="context-menu"
-    *ngIf="contextMenu.visible"
+    *ngIf="contextMenu.visible && contextMenu.row"
     [style.left.px]="contextMenu.x"
     [style.top.px]="contextMenu.y"
     (click)="$event.stopPropagation()"
@@ -531,7 +678,10 @@
       WO {{ contextMenu.row.WorkOrderID }}
     </div>
 
-    <button (click)="unplanWorkOrder()">
+    <button
+      type="button"
+      (click)="unplanWorkOrder()"
+    >
       Unplan Work Order
     </button>
 
@@ -542,8 +692,65 @@
     </div>
 
     <button
-      *ngFor="let machine of getAvailableMachinesForRow(contextMenu.row)"
-      (click)="changeMachine(contextMenu.row, machine)"
+      type="button"
+      *ngFor="
+        let machine of
+        getAvailableMachinesForRow(
+          contextMenu.row
+        )
+      "
+      (click)="changeMachine(
+        contextMenu.row,
+        machine
+      )"
+    >
+      {{ machine }}
+    </button>
+  </div>
+
+  <div
+    class="context-menu"
+    *ngIf="batchContextMenu.visible"
+    [style.left.px]="batchContextMenu.x"
+    [style.top.px]="batchContextMenu.y"
+    (click)="$event.stopPropagation()"
+  >
+    <div class="context-title">
+      Batch {{ batchContextMenu.batch?.BatchID }}
+    </div>
+
+    <div class="context-subtitle">
+      {{
+        getBatchWoCount(
+          batchContextMenu.batch
+        )
+      }}
+      work orders
+    </div>
+
+    <button
+      (click)="unplanBatch()"
+    >
+      Unplan Batch
+    </button>
+
+    <div class="context-divider"></div>
+
+    <div class="context-label">
+      Move to Oven
+    </div>
+
+    <button
+      *ngFor="
+        let machine of
+        getAvailableOvensForBatch(
+          batchContextMenu.batch
+        )
+      "
+      (click)="changeBatchMachine(
+        batchContextMenu.batch,
+        machine
+      )"
     >
       {{ machine }}
     </button>
@@ -636,37 +843,6 @@
 
       <hr>
 
-      <table>
-
-          <tr>
-              <td>Family</td>
-              <td>{{ batchTooltip.batch.Operations[0]?.ProductFamily }}</td>
-          </tr>
-
-          <tr>
-              
-              <td>Temperature</td>
-              <td>
-              {{ batchTooltip.batch.Operations[0]?.Temperature ??
-                 batchTooltip.batch.Operations[0]?.NominalTemperature }}
-              </td>
-
-          </tr>
-
-          <tr>
-              <td>Total weight</td>
-              <td>{{ getBatchTotalWeight(batchTooltip.batch) }}</td>
-          </tr>
-
-          <tr>
-              <td>Total length</td>
-              <td>{{ getBatchTotalLength(batchTooltip.batch) }}</td>
-          </tr>
-
-      </table>
-
-      <hr>
-
       <div class="tooltip-section">
 
           WORK ORDERS
@@ -675,19 +851,33 @@
 
       <div class="tooltip-workorders">
 
-          <button
+          <span
               *ngFor="let op of getUniqueBatchOperations(batchTooltip.batch)"
               class="tooltip-chip"
-              (pointerdown)="$event.stopPropagation()"
-              (click)="selectWorkOrderById($event,op.WorkOrderID)"
           >
 
               {{ op.WorkOrderID }}
 
-          </button>
+      </span>
 
       </div>
 
   </div>
+
+  <div
+    class="drag-validation"
+    *ngIf="
+      (
+        dragService.isDragging() ||
+        dragService.isBatchDragging()
+      ) &&
+      dragValidation.message
+    "
+    [class.valid]="dragValidation.valid"
+    [class.invalid]="!dragValidation.valid"
+  >
+    {{ dragValidation.message }}
+  </div>
+
 
 </div>

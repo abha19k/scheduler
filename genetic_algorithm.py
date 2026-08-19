@@ -3,6 +3,7 @@
 import random
 from copy import deepcopy
 from pathlib import Path
+import statistics
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,6 +11,15 @@ import matplotlib.pyplot as plt
 from constraints import machine_can_process
 from machine_engine import schedule_operations
 
+from kpi_engine import (
+    calculate_machine_utilization,
+    calculate_makespan_hours,
+    calculate_oven_utilization,
+    calculate_waiting_kpis,
+    calculate_delivery_kpis,
+    calculate_oven_idle_gap_hours,
+    calculate_oven_load_imbalance,
+)
 
 # =========================================================
 # GROUP OPERATIONS BY WORK ORDER
@@ -66,10 +76,15 @@ def is_press_operation(op):
 # =========================================================
 
 def create_machine_assignment(operations, machines):
+    """
+    Create a feasible, load-aware initial machine assignment.
+
+    Balances estimated processing HOURS rather than only operation count.
+    """
     assignment = {}
 
-    machine_load = {
-        machine_id: 0
+    machine_load_hours = {
+        machine_id: 0.0
         for machine_id in machines.keys()
     }
 
@@ -81,19 +96,28 @@ def create_machine_assignment(operations, machines):
         ]
 
         if not feasible:
-            raise ValueError(f"No feasible machine found for {op.OperationID}")
+            raise ValueError(
+                f"No feasible machine found for {op.OperationID}"
+            )
 
-        min_load = min(machine_load[m] for m in feasible)
+        min_load = min(
+            machine_load_hours[m]
+            for m in feasible
+        )
 
         least_loaded = [
-            m for m in feasible
-            if machine_load[m] == min_load
+            m
+            for m in feasible
+            if abs(machine_load_hours[m] - min_load) < 1e-9
         ]
 
         chosen = random.choice(least_loaded)
 
         assignment[op.OperationID] = chosen
-        machine_load[chosen] += 1
+
+        machine_load_hours[chosen] += float(
+            getattr(op, "DurationHours", 0.0) or 0.0
+        )
 
     return assignment
 
@@ -187,70 +211,6 @@ def create_individual(work_order_ids, operations, machines):
     }
 
 
-# =========================================================
-# UTILIZATION
-# =========================================================
-
-def calculate_oven_utilization(machines):
-    oven_total_time = 0
-    oven_busy_time = 0
-
-    for machine in machines.values():
-        if machine.MachineType.lower() != "batch":
-            continue
-
-        if not machine.Timeline:
-            continue
-
-        machine_start = min(
-            item["StartTime"]
-            for item in machine.Timeline
-        )
-
-        machine_end = max(
-            item["EndTime"]
-            for item in machine.Timeline
-        )
-
-        total_hours = (
-            machine_end - machine_start
-        ).total_seconds() / 3600
-
-        oven_total_time += total_hours
-
-        intervals = sorted([
-            (
-                item["StartTime"],
-                item["EndTime"]
-            )
-            for item in machine.Timeline
-        ])
-
-        merged = []
-
-        for start, end in intervals:
-            if not merged:
-                merged.append([start, end])
-                continue
-
-            _, last_end = merged[-1]
-
-            if start <= last_end:
-                merged[-1][1] = max(last_end, end)
-            else:
-                merged.append([start, end])
-
-        busy_hours = sum(
-            (end - start).total_seconds() / 3600
-            for start, end in merged
-        )
-
-        oven_busy_time += busy_hours
-
-    if oven_total_time == 0:
-        return 0
-
-    return (oven_busy_time / oven_total_time) * 100
 
 
 # =========================================================
@@ -330,35 +290,51 @@ def calculate_same_press_preference_penalty(scheduled_ops):
     return penalty
 
 
+def calculate_hot_waiting_kpis(scheduled_ops):
+    """
+    Waiting specifically after heating completes and before the WO leaves
+    the oven for its downstream operation.
+    """
+    hot_wait_minutes = []
+
+    for op in scheduled_ops:
+        if not is_heating_operation(op):
+            continue
+
+        waiting_minutes = float(
+            getattr(op, "WaitingMinutes", 0.0) or 0.0
+        )
+
+        hot_wait_minutes.append(
+            max(0.0, waiting_minutes)
+        )
+
+    if not hot_wait_minutes:
+        return {
+            "TotalHotWaitingHours": 0.0,
+            "AverageHotWaitingHours": 0.0,
+            "MaximumHotWaitingHours": 0.0,
+        }
+
+    return {
+        "TotalHotWaitingHours":
+            sum(hot_wait_minutes) / 60.0,
+
+        "AverageHotWaitingHours":
+            (
+                sum(hot_wait_minutes)
+                / len(hot_wait_minutes)
+                / 60.0
+            ),
+
+        "MaximumHotWaitingHours":
+            max(hot_wait_minutes) / 60.0,
+    }
+
+
 # =========================================================
 # EVALUATION
 # =========================================================
-
-def calculate_delivery_performance(scheduled_ops):
-    work_orders = {}
-
-    for op in scheduled_ops:
-        work_orders.setdefault(
-            op.WorkOrderID,
-            []
-        ).append(op)
-
-    if not work_orders:
-        return 0
-
-    late_work_orders = 0
-
-    for ops in work_orders.values():
-        if any(op.Late for op in ops):
-            late_work_orders += 1
-
-    total_work_orders = len(work_orders)
-    on_time_work_orders = total_work_orders - late_work_orders
-
-    return round(
-        (on_time_work_orders / total_work_orders) * 100,
-        2
-    )
 
 
 def evaluate_individual(individual, scheduling_input, grouped_operations):
@@ -375,6 +351,10 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         )
     )
 
+    # ---------------------------------------------------------
+    # DELIVERY
+    # ---------------------------------------------------------
+
     late_orders = sum(
         1 for op in scheduled_ops
         if op.Late
@@ -384,6 +364,26 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         op.LatePenalty
         for op in scheduled_ops
     )
+
+    delivery_kpis = calculate_delivery_kpis(
+        scheduled_ops
+    )
+
+    delivery_performance = (
+        delivery_kpis[
+            "DeliveryPerformancePercent"
+        ]
+    )
+
+    late_work_orders = (
+        delivery_kpis[
+            "LateWorkOrders"
+        ]
+    )
+
+    # ---------------------------------------------------------
+    # SETUP
+    # ---------------------------------------------------------
 
     total_setup = sum(
         op.SetupMinutes
@@ -405,9 +405,71 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         for op in scheduled_ops
     )
 
+    # ---------------------------------------------------------
+    # RESOURCE KPIs
+    # ---------------------------------------------------------
+
     oven_utilization = calculate_oven_utilization(
         machines
     )
+
+    oven_idle_gap_hours = (
+        calculate_oven_idle_gap_hours(
+            machines
+        )
+    )
+
+    oven_load_imbalance = (
+        calculate_oven_load_imbalance(
+            machines
+        )
+    )
+
+    machine_utilization = (
+        calculate_machine_utilization(
+            machines
+        )
+    )
+
+    makespan_hours = (
+        calculate_makespan_hours(
+            scheduled_ops
+        )
+    )
+
+    # ---------------------------------------------------------
+    # WAITING
+    # ---------------------------------------------------------
+
+    waiting_kpis = calculate_waiting_kpis(
+        scheduled_ops
+    )
+
+    hot_waiting_kpis = calculate_hot_waiting_kpis(
+        scheduled_ops
+    )
+
+    total_hot_waiting_hours = (
+        hot_waiting_kpis[
+            "TotalHotWaitingHours"
+        ]
+    )
+
+    average_hot_waiting_hours = (
+        hot_waiting_kpis[
+            "AverageHotWaitingHours"
+        ]
+    )
+
+    maximum_hot_waiting_hours = (
+        hot_waiting_kpis[
+            "MaximumHotWaitingHours"
+        ]
+    )
+
+    # ---------------------------------------------------------
+    # PREFERENCE PENALTIES
+    # ---------------------------------------------------------
 
     same_temperature_oven_penalty = (
         calculate_same_temperature_oven_change_penalty(
@@ -421,30 +483,41 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         )
     )
 
+    # ---------------------------------------------------------
+    # HARD FEASIBILITY
+    # ---------------------------------------------------------
+
     hard_infeasibility_penalty = (
         infeasible_count * 10_000_000
+        + oversoak_violations * 10_000_000
     )
 
-    late_priority_penalty = late_orders * 10_000_000
-
-    oversoak_penalty = 0
+    late_priority_penalty = (
+        late_work_orders * 10_000_000
+    )
 
     total_cost = total_setup + late_penalty
 
-
+    # ---------------------------------------------------------
+    # INDUSTRIAL SCORE
+    # ---------------------------------------------------------
 
     industrial_score = (
         hard_infeasibility_penalty
         + late_priority_penalty
         + late_penalty
         + total_setup
+
+        + maximum_hot_waiting_hours * 300.0
+        + total_hot_waiting_hours * 40.0
+
+        + oven_idle_gap_hours * 40.0
+        + oven_load_imbalance * 25.0
+
+        + makespan_hours * 10.0
+
         + same_temperature_oven_penalty
         + same_press_penalty
-    )
-
-
-    delivery_performance = calculate_delivery_performance(
-        scheduled_ops
     )
 
     objective_overrides = getattr(
@@ -453,69 +526,93 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         {}
     )
 
+    common_hard_prefix = (
+        hard_infeasibility_penalty,
+        late_work_orders,
+        late_penalty,
+        -delivery_performance,
+    )
+
     if objective_overrides.get("PrioritizeDelivery"):
-        
         fitness = (
-            hard_infeasibility_penalty,
-            late_orders,
-            late_penalty,
-            -delivery_performance,
+            *common_hard_prefix,
+            maximum_hot_waiting_hours,
+            total_hot_waiting_hours,
+            makespan_hours,
+            oven_idle_gap_hours,
+            oven_load_imbalance,
+            -oven_utilization,
             total_setup,
             industrial_score,
         )
 
     elif objective_overrides.get("PrioritizeOvenUtilization"):
         fitness = (
-            hard_infeasibility_penalty,
+            *common_hard_prefix,
+            maximum_hot_waiting_hours,
+            oven_idle_gap_hours,
+            oven_load_imbalance,
             -oven_utilization,
-            same_temperature_oven_penalty,
-            late_orders,
-            late_penalty,
+            total_hot_waiting_hours,
+            makespan_hours,
             total_setup,
             industrial_score,
         )
 
     elif objective_overrides.get("PrioritizeSetupReduction"):
         fitness = (
-            hard_infeasibility_penalty,
+            *common_hard_prefix,
+            maximum_hot_waiting_hours,
             total_setup,
-            same_temperature_oven_penalty,
-            same_press_penalty,
-            late_orders,
-            late_penalty,
+            total_hot_waiting_hours,
+            oven_idle_gap_hours,
+            oven_load_imbalance,
+            makespan_hours,
+            -oven_utilization,
             industrial_score,
         )
 
     elif objective_overrides.get("PrioritizeTemperatureStability"):
         fitness = (
-            hard_infeasibility_penalty,
+            *common_hard_prefix,
+            maximum_hot_waiting_hours,
             same_temperature_oven_penalty,
+            total_hot_waiting_hours,
+            oven_idle_gap_hours,
+            oven_load_imbalance,
+            makespan_hours,
             -oven_utilization,
             total_setup,
-            late_orders,
-            late_penalty,
             industrial_score,
         )
 
     else:
+        # Default industrial APS objective hierarchy.
         fitness = (
-            hard_infeasibility_penalty,
+            *common_hard_prefix,
 
-            late_orders,
-            late_penalty,
+            maximum_hot_waiting_hours,
+            total_hot_waiting_hours,
 
-            -delivery_performance,
+            oven_idle_gap_hours,
+            oven_load_imbalance,
+
+            makespan_hours,
 
             -oven_utilization,
+            -machine_utilization,
 
             total_setup,
 
             same_temperature_oven_penalty,
             same_press_penalty,
 
-            industrial_score
-        )
+            waiting_kpis[
+                "TotalWaitingHours"
+            ],
 
+            industrial_score,
+        )
 
     return {
         "fitness": fitness,
@@ -527,6 +624,7 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         "oversoak_violations": oversoak_violations,
 
         "late_orders": late_orders,
+        "late_work_orders": late_work_orders,
         "late_penalty": late_penalty,
 
         "setup": total_setup,
@@ -535,6 +633,35 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
         "temperature_setup": temperature_setup,
 
         "oven_utilization": oven_utilization,
+        "machine_utilization": machine_utilization,
+        "makespan_hours": makespan_hours,
+
+        "oven_idle_gap_hours": oven_idle_gap_hours,
+        "oven_load_imbalance": oven_load_imbalance,
+
+        "total_waiting_hours":
+            waiting_kpis[
+                "TotalWaitingHours"
+            ],
+
+        "average_waiting_hours":
+            waiting_kpis[
+                "AverageWaitingHours"
+            ],
+
+        "maximum_waiting_hours":
+            waiting_kpis[
+                "MaximumWaitingHours"
+            ],
+
+        "total_hot_waiting_hours":
+            total_hot_waiting_hours,
+
+        "average_hot_waiting_hours":
+            average_hot_waiting_hours,
+
+        "maximum_hot_waiting_hours":
+            maximum_hot_waiting_hours,
 
         "same_temperature_oven_penalty":
             same_temperature_oven_penalty,
@@ -553,10 +680,10 @@ def evaluate_individual(individual, scheduling_input, grouped_operations):
     }
 
 
-
 def is_feasible_result(result):
     return (
         result["infeasible_count"] == 0
+        and result["oversoak_violations"] == 0
     )
 
 
@@ -650,6 +777,7 @@ def mutate(individual, scheduling_input, mutation_rate):
         "reverse_work_orders",
         "scramble_work_orders",
         "machine_change",
+        "heating_route_machine_change",
     ])
 
     work_order_order = individual["work_order_order"]
@@ -710,22 +838,98 @@ def mutate(individual, scheduling_input, mutation_rate):
 
         feasible = [
             machine_id
-            for machine_id, machine in scheduling_input.machines.items()
-            if machine_can_process(op, machine)
+            for machine_id, machine
+            in scheduling_input.machines.items()
+            if machine_can_process(
+                op,
+                machine
+            )
         ]
 
         if feasible:
-            individual["assignment"][op.OperationID] = (
-                random.choice(feasible)
+            individual[
+                "assignment"
+            ][
+                op.OperationID
+            ] = random.choice(
+                feasible
             )
 
-            individual["assignment"] = (
+            individual[
+                "assignment"
+            ] = (
                 hard_lock_same_temperature_oven_assignment(
                     scheduling_input.operations,
                     scheduling_input.machines,
-                    individual["assignment"],
+                    individual[
+                        "assignment"
+                    ],
                 )
             )
+
+    elif mutation_type == "heating_route_machine_change":
+        heating_ops = [
+            op
+            for op in scheduling_input.operations
+            if is_heating_operation(op)
+        ]
+
+        if heating_ops:
+            seed_op = random.choice(
+                heating_ops
+            )
+
+            route_ops = [
+                op
+                for op in heating_ops
+                if (
+                    op.WorkOrderID
+                    == seed_op.WorkOrderID
+                    and op.Temperature
+                    == seed_op.Temperature
+                )
+            ]
+
+            common_feasible = None
+
+            for route_op in route_ops:
+                feasible_for_op = {
+                    machine_id
+                    for machine_id, machine
+                    in scheduling_input.machines.items()
+                    if (
+                        (
+                            getattr(
+                                machine,
+                                "MachineType",
+                                "",
+                            )
+                            or ""
+                        ).lower()
+                        == "batch"
+                        and machine_can_process(
+                            route_op,
+                            machine,
+                        )
+                    )
+                }
+
+                if common_feasible is None:
+                    common_feasible = feasible_for_op
+                else:
+                    common_feasible &= feasible_for_op
+
+            if common_feasible:
+                chosen_oven = random.choice(
+                    sorted(common_feasible)
+                )
+
+                for route_op in route_ops:
+                    individual[
+                        "assignment"
+                    ][
+                        route_op.OperationID
+                    ] = chosen_oven
 
     return individual
 
@@ -969,6 +1173,7 @@ def run_ga(scheduling_input):
             .ScenarioName
         )
 
+
     print("\n========================================")
     print(f"ACTIVE SCENARIO: {scenario_name}")
     print("========================================")
@@ -1085,6 +1290,57 @@ def run_ga(scheduling_input):
             key=lambda x: x["result"]["fitness"]
         )
 
+        unique_orders = {
+            tuple(
+                item["individual"]["work_order_order"]
+            )
+            for item in evaluated
+        }
+
+        unique_assignments = {
+            tuple(
+                sorted(
+                    item["individual"]["assignment"].items()
+                )
+            )
+            for item in evaluated
+        }
+
+        unique_fitness_values = {
+            item["result"]["fitness"]
+            for item in evaluated
+        }
+
+        generation_best_result = (
+            evaluated[0]["result"]
+        )
+
+        generation_makespans = [
+            item["result"]["makespan_hours"]
+            for item in evaluated
+        ]
+
+        min_generation_makespan = min(
+            generation_makespans
+        )
+
+        max_generation_makespan = max(
+            generation_makespans
+        )
+
+        generation_waiting_values = [
+            item["result"]["total_waiting_hours"]
+            for item in evaluated
+        ]
+
+        min_generation_waiting = min(
+            generation_waiting_values
+        )
+
+        max_generation_waiting = max(
+            generation_waiting_values
+        )
+
         if improved_this_generation:
             no_improvement_count = 0
         else:
@@ -1095,6 +1351,82 @@ def run_ga(scheduling_input):
             if best_feasible_result is not None
             else best_result
         )
+
+        generation_oven_idle_values = [
+            item["result"]["oven_idle_gap_hours"]
+            for item in evaluated
+        ]
+
+        min_oven_idle = min(
+            generation_oven_idle_values
+        )
+
+        max_oven_idle = max(
+            generation_oven_idle_values
+        )
+
+        generation_oven_imbalance_values = [
+            item["result"]["oven_load_imbalance"]
+            for item in evaluated
+        ]
+
+        min_oven_imbalance = min(
+            generation_oven_imbalance_values
+        )
+
+        max_oven_imbalance = max(
+            generation_oven_imbalance_values
+        )
+
+        
+
+        feasible_industrial_scores = [
+            item["result"]["industrial_score"]
+            for item in evaluated
+            if (
+                item["result"]["infeasible_count"] == 0
+                and item["result"]["late_orders"] == 0
+            )
+        ]
+
+        if feasible_industrial_scores:
+
+            best_industrial = min(
+                feasible_industrial_scores
+            )
+
+            avg_industrial = statistics.mean(
+                feasible_industrial_scores
+            )
+
+            worst_industrial = max(
+                feasible_industrial_scores
+            )
+
+            std_industrial = (
+                statistics.stdev(
+                    feasible_industrial_scores
+                )
+                if len(
+                    feasible_industrial_scores
+                ) > 1
+                else 0
+            )
+
+        else:
+
+            best_industrial = 0
+            avg_industrial = 0
+            worst_industrial = 0
+            std_industrial = 0
+
+        feasible_population_count = len(
+            feasible_industrial_scores
+        )
+
+        f"Feasible Pop: "
+        f"{feasible_population_count}/"
+        f"{len(evaluated)} | "
 
         history.append({
             "Generation": generation + 1,
@@ -1175,28 +1507,87 @@ def run_ga(scheduling_input):
             or generation == params.Generations - 1
         ):
             print(
-                f"Generation {generation + 1} | "
-                f"Infeasible: {best_result['infeasible_count']} | "
-                f"OverSoak: {best_result['oversoak_violations']} | "
-                f"Late: {best_result['late_orders']} | "
-                f"Delivery: {best_result['delivery_performance']}% | "
-                f"Oven Util: {best_result['oven_utilization']:.2f}% | "
-                f"Setup: {best_result['setup']} | "
-                f"Cost: {best_result['total_cost']} | "
-                f"Industrial Score: {best_result['industrial_score']} | "
-                f"Export Feasible: {best_feasible_result is not None}"
+                f"Generation {generation + 1:>3} | "
+                f"Feasible: "
+                f"{'Yes' if generation_best_result['infeasible_count'] == 0 else 'No'} | "
+                f"Infeasible: "
+                f"{generation_best_result['infeasible_count']} | "
+                f"OverSoak: "
+                f"{generation_best_result['oversoak_violations']} | "
+                f"Delivery: "
+                f"{generation_best_result['delivery_performance']:.2f}% | "
+                f"Late Ops: "
+                f"{generation_best_result['late_orders']} | "
+                f"Oven Util: "
+                f"{generation_best_result['oven_utilization']:.2f}% | "
+                f"Oven Idle: "
+                f"{generation_best_result['oven_idle_gap_hours']:.2f}h | "
+                f"Oven Imbalance: "
+                f"{generation_best_result['oven_load_imbalance']:.2f}h | "
+                f"Oven Idle Range: "
+                f"{min_oven_idle:.2f}-"
+                f"{max_oven_idle:.2f}h | "
+                f"Oven Balance Range: "
+                f"{min_oven_imbalance:.2f}-"
+                f"{max_oven_imbalance:.2f}h | "
+                f"Machine Util: "
+                f"{generation_best_result['machine_utilization']:.2f}% | "
+                f"Makespan: "
+                f"{generation_best_result['makespan_hours']:.2f}h | "
+                f"Makespan Range: "
+                f"{min_generation_makespan:.2f}-"
+                f"{max_generation_makespan:.2f}h | "
+                f"Waiting: "
+                f"{generation_best_result['total_waiting_hours']:.2f}h | "
+                f"Hot Wait: "
+                f"{generation_best_result['total_hot_waiting_hours']:.2f}h | "
+                f"Max Hot Wait: "
+                f"{generation_best_result['maximum_hot_waiting_hours']:.2f}h | "
+                f"Waiting Range: "
+                f"{min_generation_waiting:.2f}-"
+                f"{max_generation_waiting:.2f}h | "
+                f"Avg Wait: "
+                f"{generation_best_result['average_waiting_hours']:.2f}h | "
+                f"Max Wait: "
+                f"{generation_best_result['maximum_waiting_hours']:.2f}h | "
+                f"Setup: "
+                f"{generation_best_result['setup']:.0f} | "
+                f"Penalty: "
+                f"{generation_best_result['late_penalty']:.0f} | "
+                f"Industrial: "
+                f"{generation_best_result['industrial_score']:.0f} | "
+                f"Industrial Stats: "
+                f"{best_industrial:.0f}/"
+                f"{avg_industrial:.0f}/"
+                f"{worst_industrial:.0f} "
+                f"(σ={std_industrial:.1f}) | "
+                f"Unique Orders: {len(unique_orders)} | "
+                f"Unique Assignments: {len(unique_assignments)} | "
+                f"Unique Fitness: {len(unique_fitness_values)} | "
             )
 
             if best_feasible_result is not None:
                 print(
-                    f"    Best feasible | "
-                    f"Late: {best_feasible_result['late_orders']} | "
-                    f"Delivery: {best_feasible_result['delivery_performance']}% | "
+                    f"      Best Feasible | "
+                    f"Delivery: {best_feasible_result['delivery_performance']:.2f}% | "
+                    f"Late Ops: {best_feasible_result['late_orders']} | "
                     f"Oven Util: {best_feasible_result['oven_utilization']:.2f}% | "
-                    f"Setup: {best_feasible_result['setup']} | "
-                    f"Cost: {best_feasible_result['total_cost']} | "
-                    f"Industrial Score: "
-                    f"{best_feasible_result['industrial_score']}"
+                    f"Machine Util: {best_feasible_result['machine_utilization']:.2f}% | "
+                    f"Makespan: "
+                    f"{best_feasible_result['makespan_hours']:.2f}h | "
+                    f"Waiting: "
+                    f"{best_feasible_result['total_waiting_hours']:.2f}h | "
+                    f"Hot Wait: "
+                    f"{best_feasible_result['total_hot_waiting_hours']:.2f}h | "
+                    f"Max Hot Wait: "
+                    f"{best_feasible_result['maximum_hot_waiting_hours']:.2f}h | "
+                    f"Avg Wait: "
+                    f"{best_feasible_result['average_waiting_hours']:.2f}h | "
+                    f"Max Wait: "
+                    f"{best_feasible_result['maximum_waiting_hours']:.2f}h | "
+                    f"Setup: {best_feasible_result['setup']:.0f} | "
+                    f"Penalty: {best_feasible_result['late_penalty']:.0f} | "
+                    f"Industrial: {best_feasible_result['industrial_score']:.0f}"
                 )
 
         if no_improvement_count >= early_stop_generations:
