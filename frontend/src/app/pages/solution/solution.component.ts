@@ -361,17 +361,61 @@ export class SolutionComponent {
   }
 
   onScenarioChange(event: Event): void {
-    const scenarioId = (event.target as HTMLSelectElement).value;
 
-    this.scenarioService.setActiveScenario(scenarioId);
-
-    const selected = this.scenarioService.activeScenario();
-
-    if (!selected) {
+    const scenarioId =
+      (event.target as HTMLSelectElement).value;
+  
+    this.selectedScenarioId =
+      scenarioId;
+  
+    /*
+     * Try to activate an existing schedule result.
+     */
+    this.scenarioService.setActiveScenario(
+      scenarioId
+    );
+  
+    const selected =
+      this.scenarioService.activeScenario();
+  
+    /*
+     * Scenario already has a schedule result.
+     */
+    if (
+      selected &&
+      selected.ScenarioID === scenarioId
+    ) {
+      this.loadScenarioIntoView(
+        selected
+      );
+  
       return;
     }
-
-    this.loadScenarioIntoView(selected);
+  
+    /*
+     * Scenario exists as a definition but has
+     * not been optimized yet.
+     *
+     * Keep it selected for Run Optimizer,
+     * but don't display another scenario's result.
+     */
+    this.activeScenario = null;
+  
+    this.gantt = [];
+    this.plannedTasks = [];
+    this.schedule = [];
+    this.workOrderSequence = [];
+  
+    this.kpis = {
+      feasible: '-',
+      deliveryPerformance: '-',
+      lateOrders: '-',
+      overSoak: '-',
+      ovenUtilization: '-',
+      totalCost: '-'
+    };
+  
+    this.clearSelection();
   }
 
 
@@ -1466,16 +1510,83 @@ export class SolutionComponent {
     );
   }
 
+  private getRenderedOperationElement(
+    row: any
+  ): HTMLElement | null {
+  
+    const operationId =
+      String(
+        row?.OperationID || ''
+      ).trim();
+  
+    if (!operationId) {
+      return null;
+    }
+  
+    const elements =
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-operation-id]'
+        )
+      );
+  
+    return (
+      elements.find(
+        element =>
+          String(
+            element.getAttribute(
+              'data-operation-id'
+            )
+          ).trim() === operationId
+      ) || null
+    );
+  }
+
   getRowCenterX(
     row: any,
     side: 'start' | 'end'
   ): number {
   
+    const element =
+      this.getRenderedOperationElement(
+        row
+      );
+  
+    const svg =
+      document.querySelector(
+        '.precedence-layer'
+      ) as SVGElement | null;
+  
     /*
-     * Use the timing of the ACTUAL operation row.
-     *
-     * Do not use the outer batch-card width for
-     * precedence arrows.
+     * Preferred method:
+     * use the actual rendered DOM element.
+     */
+    if (
+      element &&
+      svg
+    ) {
+      const elementRect =
+        element.getBoundingClientRect();
+  
+      const svgRect =
+        svg.getBoundingClientRect();
+  
+      if (side === 'start') {
+        return (
+          elementRect.left -
+          svgRect.left
+        );
+      }
+  
+      return (
+        elementRect.right -
+        svgRect.left
+      );
+    }
+  
+    /*
+     * Fallback only if DOM element
+     * cannot be found.
      */
     const startValue =
       row.StartTime;
@@ -1502,21 +1613,54 @@ export class SolutionComponent {
     const time =
       new Date(value).getTime();
   
-    const min =
-      this.getMinTime();
-  
     return (
       (
-        time - min
+        time -
+        this.getMinTime()
       ) /
       (1000 * 60 * 60)
     ) * this.pixelsPerHour;
   }
 
-
   getRowCenterY(
     row: any
   ): number {
+  
+    const element =
+      this.getRenderedOperationElement(
+        row
+      );
+  
+    const svg =
+      document.querySelector(
+        '.precedence-layer'
+      ) as SVGElement | null;
+  
+    /*
+     * Preferred method:
+     * anchor directly to the centre of
+     * the rendered operation.
+     */
+    if (
+      element &&
+      svg
+    ) {
+      const elementRect =
+        element.getBoundingClientRect();
+  
+      const svgRect =
+        svg.getBoundingClientRect();
+  
+      return (
+        elementRect.top -
+        svgRect.top +
+        elementRect.height / 2
+      );
+    }
+  
+    /*
+     * Fallback.
+     */
     const machine =
       row.AssignedMachine ||
       row.PlannedMachine;
@@ -1526,67 +1670,6 @@ export class SolutionComponent {
         machine
       );
   
-    /*
-     * OVEN BATCH
-     *
-     * Anchor the arrow to the actual WO line
-     * displayed inside the batch card.
-     */
-    if (
-      this.isOven(row) &&
-      row.BatchID
-    ) {
-      const batch =
-        this.getBatchForRow(row);
-  
-      if (batch) {
-        const operations =
-          this.getUniqueBatchOperations(
-            batch
-          );
-  
-        const woIndex =
-          operations.findIndex(
-            (op: any) =>
-              String(op.WorkOrderID) ===
-              String(row.WorkOrderID)
-          );
-  
-        const safeIndex =
-          Math.max(
-            0,
-            woIndex
-          );
-  
-        /*
-         * Current batch structure:
-         *
-         * batch starts ~12px from row top
-         * header occupies roughly 38px
-         * each WO button occupies ~26px
-         */
-        const batchTop =
-          this.getBatchTop(batch);
-  
-        const headerHeight =
-          38;
-  
-        const workOrderHeight =
-          26;
-  
-        return (
-          machineTop +
-          batchTop +
-          headerHeight +
-          safeIndex * workOrderHeight +
-          workOrderHeight / 2
-        );
-      }
-    }
-  
-    /*
-     * NORMAL TASK / PRESS
-     */
     const rowTop =
       this.getTop(row);
   
@@ -1716,40 +1799,10 @@ export class SolutionComponent {
        * visible node. Normal press/task rows remain
        * separate nodes.
        */
-      const visibleRows: any[] = [];
-      const seenKeys =
-        new Set<string>();
-  
-      for (const row of sortedRows) {
-        const machine =
-          String(
-            row.AssignedMachine ||
-            row.PlannedMachine ||
-            ''
-          );
-  
-        const visibleKey =
-          this.isOven(row) &&
-          row.BatchID
-            ? (
-                `BATCH|${machine}|` +
-                `${String(row.BatchID)}`
-              )
-            : (
-                `TASK|` +
-                `${String(
-                  row.PlannedTaskID ||
-                  row.OperationID
-                )}`
-              );
-  
-        if (seenKeys.has(visibleKey)) {
-          continue;
-        }
-  
-        seenKeys.add(visibleKey);
-        visibleRows.push(row);
-      }
+
+      const visibleRows =
+        [...sortedRows];
+
   
       for (
         let index = 0;
@@ -1775,27 +1828,6 @@ export class SolutionComponent {
           continue;
         }
 
-        if (
-          String(workOrderId) ===
-          String(this.selectedWorkOrderId)
-        ) {
-          console.log(
-            '[ARROW LINK]',
-            `WO=${workOrderId}`,
-            `FROM Seq=${from.SequenceNumber}`,
-            `FROM Op=${from.OperationID}`,
-            `FROM Machine=${from.AssignedMachine || from.PlannedMachine}`,
-            `FROM Start=${from.StartTime}`,
-            `FROM End=${from.EndTime}`,
-            `FROM Release=${from.ReleaseTime}`,
-            '→',
-            `TO Seq=${to.SequenceNumber}`,
-            `TO Op=${to.OperationID}`,
-            `TO Machine=${to.AssignedMachine || to.PlannedMachine}`,
-            `TO Start=${to.StartTime}`,
-            `TO End=${to.EndTime}`
-          );
-        }
   
         links.push({
           workOrderId,
@@ -1840,18 +1872,26 @@ export class SolutionComponent {
     return links;
   }
 
+  getPrecedenceTopOffset(): number {
+    const header =
+      document.querySelector(
+        '.timeline-header'
+      ) as HTMLElement | null;
+  
+    if (!header) {
+      return 96;
+    }
+  
+    return header.offsetHeight;
+  }
+
   getVisiblePrecedenceLinks(): any[] {
     const links =
       this.getPrecedenceLinks();
   
     /*
-     * --------------------------------------------------
-     * SELECTED BATCH
-     * --------------------------------------------------
-     *
-     * If the whole batch itself was clicked,
-     * showing all immediate incoming/outgoing links
-     * is acceptable.
+     * Whole batch selected:
+     * retain current batch behaviour.
      */
     if (this.selectedBatch) {
       const batchKey =
@@ -1879,27 +1919,12 @@ export class SolutionComponent {
     }
   
     /*
-     * --------------------------------------------------
-     * SELECTED WORK ORDER / OPERATION
-     * --------------------------------------------------
+     * WO / operation selected:
      *
-     * This is the important correction.
-     *
-     * A batch contains several WOs, so filtering only
-     * on visible batch key also returns arrows belonging
-     * to the OTHER WOs in the same batch.
-     *
-     * Require BOTH:
-     *
-     *   1. same WO
-     *   2. link touches selected visible operation
+     * Show ALL precedence links belonging
+     * to this work order.
      */
     if (this.selectedRow) {
-      const rowKey =
-        this.getVisibleTaskKey(
-          this.selectedRow
-        );
-  
       const workOrderId =
         String(
           this.selectedRow.WorkOrderID
@@ -1909,19 +1934,13 @@ export class SolutionComponent {
         link =>
           String(
             link.workOrderId
-          ) ===
-          workOrderId &&
-          (
-            link.fromVisibleKey ===
-              rowKey ||
-            link.toVisibleKey ===
-              rowKey
-          )
+          ) === workOrderId
       );
     }
   
     /*
-     * Fallback.
+     * Work-order selection fallback:
+     * also show complete chain.
      */
     if (this.selectedWorkOrderId) {
       return links.filter(
@@ -1935,6 +1954,7 @@ export class SolutionComponent {
   
     return [];
   }
+
 
   getArrowPath(
     link: any

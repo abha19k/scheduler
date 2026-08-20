@@ -373,14 +373,14 @@
 }
 
 
+
 .precedence-layer {
   position: absolute;
-  left: 90px;
-  top: 96px;
 
   z-index: 40;
 
   pointer-events: none;
+
   overflow: visible;
 }
 
@@ -388,7 +388,7 @@
   fill: none;
 
   stroke: #334155;
-  stroke-width: 2.2;
+  stroke-width: 3.2;
 
   stroke-dasharray: 8 5;
 

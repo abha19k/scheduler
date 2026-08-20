@@ -25,7 +25,89 @@
     </nav>
   </header>
 
-  <section class="run-strip">
+  <section class="scenario-strip">
+
+    <div class="scenario-left">
+      <label>Scenario</label>
+  
+      <select
+        [(ngModel)]="selectedScenarioId"
+        (change)="onScenarioChange($event)"
+      >
+        <option
+          *ngFor="let scenario of getScenarioDefinitions()"
+          [value]="scenario.ScenarioID"
+        >
+          {{ scenario.ScenarioName }}
+        </option>
+      </select>
+    </div>
+  
+    <div class="scenario-meta" *ngIf="activeScenario">
+  
+      <span>
+        ID: {{ activeScenario.ScenarioID }}
+      </span>
+  
+      <span>
+        {{
+          activeScenario.IsManualScenario
+            ? 'Manual Schedule'
+            : 'Optimizer Schedule'
+        }}
+      </span>
+  
+      <span>
+        Changes:
+        {{
+          scenarioService
+            .activeScenario()
+            ?.ManualChanges
+            ?.length || 0
+        }}
+      </span>
+  
+    </div>
+  
+    <div class="scenario-actions">
+  
+      <button
+        class="run-btn"
+        (click)="runScheduler()"
+        [disabled]="loading || activeScenario?.IsManualScenario"
+      >
+        {{ loading ? 'Running...' : 'Run Optimizer' }}
+      </button>
+  
+      <button
+        class="clone-btn"
+        (click)="cloneActiveScenario()"
+        [disabled]="!activeScenario"
+      >
+        Copy Schedule for Manual Editing
+      </button>
+  
+      <button
+        class="undo-btn"
+        (click)="undoLastChange()"
+        [disabled]="
+          !activeScenario?.IsManualScenario ||
+          !(
+            scenarioService
+              .activeScenario()
+              ?.ManualChanges
+              ?.length
+          )
+        "
+      >
+        Undo Last Change
+      </button>
+  
+    </div>
+  
+  </section>
+
+  <!-- <section class="run-strip">
     <div class="scenario-selector">
       <label>Scenario to Run</label>
 
@@ -104,7 +186,7 @@
       </button>
     
     </div>
-  </section>
+  </section> -->
 
   <div class="top-grid">
     <section class="panel workorder-panel">
@@ -266,9 +348,11 @@
           </div>
         
         </div>
-    
+        
         <svg
           class="precedence-layer"
+          [style.left.px]="132"
+          [style.top.px]="getPrecedenceTopOffset()"
           [attr.width]="getTimelineWidth()"
           [attr.height]="getGanttHeight()"
         >
@@ -483,7 +567,11 @@
                   <button
                     type="button"
                     class="batch-operation batch-operation-button"
+
                     *ngFor="let op of getUniqueBatchOperations(batch)"
+
+                    [attr.data-work-order-id]="op.WorkOrderID"
+                    [attr.data-operation-id]="op.OperationID"
 
                     [class.selected-workorder]="
                       isWorkOrderSelected(op.WorkOrderID)
@@ -515,44 +603,47 @@
             >
 
               <div
-              *ngIf="!row.BatchID"
-              class="gantt-bar"
+                *ngIf="!row.BatchID"
+                class="gantt-bar"
 
-              [class.oven-bar]="isOven(row)"
-              [class.press-bar]="isPress(row)"
-              [class.manual-operation]="
-                row.IsManual === true ||
-                row.Source === 'MANUAL'
-              "
-              [class.selected-bar]="selectedRow?.OperationID === row.OperationID"
-              [class.dragging]="isRowBeingDragged(row)"
-              [class.draggable]="activeScenario?.IsManualScenario"
+                [attr.data-operation-id]="row.OperationID"
+                [attr.data-work-order-id]="row.WorkOrderID"
 
-              [class.drag-valid]="
-                isRowBeingDragged(row) && dragValidation.valid
-              "
+                [class.oven-bar]="isOven(row)"
+                [class.press-bar]="isPress(row)"
+                [class.manual-operation]="
+                  row.IsManual === true ||
+                  row.Source === 'MANUAL'
+                "
+                [class.selected-bar]="selectedRow?.OperationID === row.OperationID"
+                [class.dragging]="isRowBeingDragged(row)"
+                [class.draggable]="activeScenario?.IsManualScenario"
 
-              [class.drag-invalid]="
-                isRowBeingDragged(row) && !dragValidation.valid
-              "
-              [class.selected-workorder]="
-                isWorkOrderSelected(row.WorkOrderID)
-              "
+                [class.drag-valid]="
+                  isRowBeingDragged(row) && dragValidation.valid
+                "
 
-              [class.dimmed-workorder]="
-                isWorkOrderDimmed(row.WorkOrderID)
-              "
+                [class.drag-invalid]="
+                  isRowBeingDragged(row) && !dragValidation.valid
+                "
 
-              [style.left.px]="getLeft(row)"
-              [style.width.px]="getWidth(row)"
-              [style.top.px]="getTop(row)"
-              [style.height.px]="getBarHeight(row)"
-              
-              (mousedown)="startDrag($event, row)"
-              (click)="selectOperation($event, row)"
-              (contextmenu)="openContextMenu($event, row)"
-              >
+                [class.selected-workorder]="
+                  isWorkOrderSelected(row.WorkOrderID)
+                "
 
+                [class.dimmed-workorder]="
+                  isWorkOrderDimmed(row.WorkOrderID)
+                "
+
+                [style.left.px]="getLeft(row)"
+                [style.width.px]="getWidth(row)"
+                [style.top.px]="getTop(row)"
+                [style.height.px]="getBarHeight(row)"
+
+                (mousedown)="startDrag($event, row)"
+                (click)="selectOperation($event, row)"
+                (contextmenu)="openContextMenu($event, row)"
+                >
                 <div class="bar-title">
                   WO {{ row.WorkOrderID }}
                 </div>
@@ -561,6 +652,7 @@
                   Seq {{ row.SequenceNumber }}
                 </div>
               </div>
+
 
             </ng-container>
           </div>
